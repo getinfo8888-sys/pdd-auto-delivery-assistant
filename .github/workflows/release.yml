@@ -1,0 +1,56 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Check version tag
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Version tag does not match package.json' }
+      - run: npm ci
+      - run: npm run check:public
+      - run: npm test
+      - name: Isolated workflow smoke
+        run: npx --no-install electron . --smoke-test
+      - name: Build installer and portable application
+        run: npx --no-install electron-builder --win nsis portable --x64 --publish never
+      - run: npm run verify:release
+      - name: Retain build outputs
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: windows-${{ github.ref_name }}
+          path: |
+            dist/*.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = node -p "require('./package.json').version"
+          $assets = @(Get-ChildItem -LiteralPath dist -File | Where-Object { $_.Extension -eq '.exe' -or $_.Name -eq 'SHA256SUMS.txt' } | ForEach-Object FullName)
+          gh release create "$env:GITHUB_REF_NAME" @assets --verify-tag --title "拼多多自动发货助手 $version" --notes-file work/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }

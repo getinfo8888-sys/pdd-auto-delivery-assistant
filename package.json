@@ -1,0 +1,78 @@
+{
+  "name": "pdd-auto-delivery-assistant",
+  "version": "0.3.10",
+  "description": "拼多多商家本地智能答复与自动发货工具",
+  "private": true,
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "make-icon": "node scripts/make-icon.cjs",
+    "prepare-runtime": "node node_modules/electron/install.js",
+    "test": "node --test test/*.test.cjs",
+    "dist": "electron-builder --win nsis --x64",
+    "dist:portable": "electron-builder --win portable --x64",
+    "check:public": "node scripts/check-public-source.cjs",
+    "verify:release": "node scripts/verify-release.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.7.2",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "local.linkfulfillment.workbench",
+    "productName": "拼多多自动发货助手",
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "src/renderer/icon.ico",
+        "to": "app-icon.ico"
+      }
+    ],
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signExecutable": false,
+      "icon": "src/renderer/icon.ico"
+    },
+    "portable": {
+      "artifactName": "拼多多自动发货助手-${version}-win-x64.exe"
+    },
+    "nsis": {
+      "include": "scripts/installer-icons.nsh",
+      "artifactName": "拼多多自动发货助手-${version}-安装包-x64.exe",
+      "oneClick": false,
+      "perMachine": false,
+      "selectPerMachineByDefault": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "拼多多自动发货助手",
+      "uninstallDisplayName": "拼多多自动发货助手",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "differentialPackage": false
+    },
+    "forceCodeSigning": false
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getinfo8888-sys/pdd-auto-delivery-assistant.git"
+  },
+  "homepage": "https://github.com/getinfo8888-sys/pdd-auto-delivery-assistant#readme",
+  "bugs": {
+    "url": "https://github.com/getinfo8888-sys/pdd-auto-delivery-assistant/issues"
+  }
+}

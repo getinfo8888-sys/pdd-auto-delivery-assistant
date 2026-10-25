@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.pddpic.com https://*.yangkeduo.com https://*.pinduoduo.com https://*.pddugc.com; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>拼多多自动发货助手</title><link rel="icon" type="image/svg+xml" href="icon.svg"><link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand" aria-label="拼多多自动发货助手"><div class="brand-icon"><img src="icon.svg" width="40" height="40" alt=""></div><div><strong>拼多多<br>自动发货助手</strong><span>本地工作台</span></div></div>
+    <div class="nav-label">店铺管理</div>
+    <nav id="nav"></nav>
+    <div class="sidebar-bottom"><div class="local-mark"><span class="dot"></span> 数据保存在本机</div><p>规则、记录与网页登录会话<br>分开保存，各自独立。</p><button class="link-button" data-action="backup">备份我的规则 <span>↗</span></button></div>
+  </aside>
+  <div class="workspace"><header class="topbar"><div><div class="breadcrumb">我的店铺 <span>/</span> <span id="breadcrumb">工作台</span></div><div class="top-caption">让每一份资源，准确到达买家手中。</div></div><div class="top-actions"><span id="running-status" class="status-label"><i></i>监听已暂停</span><button id="running-button" class="button primary" data-action="running">开始监听</button></div></header><main id="content"><div class="loading">正在打开你的工作台…</div></main></div>
+  <div id="modal-root"></div><div id="toast" role="status"></div>
+  <script src="app.js"></script>
+</body></html>

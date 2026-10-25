@@ -1,0 +1,37 @@
+name: 问题反馈
+description: 报告软件异常或功能问题
+title: '[问题] '
+body:
+  - type: markdown
+    attributes:
+      value: 请勿提交密码、Cookie、Token、真实订单号、买家信息或店铺规则备份。截图请先遮盖相关信息。
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本
+      placeholder: 例如 0.3.10
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows 版本
+      placeholder: Windows 10 / 11
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 按什么顺序操作后出现问题？
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 预期与实际表现
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: 补充信息
+      description: 可补充经过脱敏的提示文本或截图，不要上传浏览器缓存或整份本机状态文件。
