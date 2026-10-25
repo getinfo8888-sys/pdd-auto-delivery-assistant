@@ -47,6 +47,8 @@ npm run dist
 
 ## 更新和反馈
 
+任何人都可以下载、克隆和 Fork 公开仓库。希望将修改合入本项目，请提交 Pull Request，由维护者审核后决定是否合并；不会自动改动主仓库。协作流程见 [参与开发](CONTRIBUTING.md)。
+
 每次源码推送都会执行检查；正式版本通过版本标签构建并发布 Windows 安装包及便携版。更新记录见 [CHANGELOG](CHANGELOG.md)，参与开发见 [CONTRIBUTING](CONTRIBUTING.md)。遇到问题可在 Issues 描述版本、复现步骤和表现，提交截图前请遮盖个人及店铺信息。
 
 ## 许可证
