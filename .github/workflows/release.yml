@@ -41,7 +41,7 @@ jobs:
         with:
           name: windows-${{ github.ref_name }}
           path: |
-            dist/*.exe
+            dist/PDD-Auto-Delivery-Assistant-*.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
@@ -51,6 +51,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = node -p "require('./package.json').version"
-          $assets = @(Get-ChildItem -LiteralPath dist -File | Where-Object { $_.Extension -eq '.exe' -or $_.Name -eq 'SHA256SUMS.txt' } | ForEach-Object FullName)
+          $assets = @(Get-Content -LiteralPath work/release-assets.json -Raw | ConvertFrom-Json | ForEach-Object { Join-Path dist $_ })
           gh release create "$env:GITHUB_REF_NAME" @assets --verify-tag --title "拼多多自动发货助手 $version" --notes-file work/release-notes.md
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }

@@ -43,7 +43,7 @@ git push origin v版本号
 
 `Windows release` 工作流会在 Windows 上安装依赖、检查源码、运行单元与隔离工作流测试、生成安装包和便携程序、核对包内源码并计算 SHA256，最后发布到 Releases。工作流只使用 GitHub 自带的临时令牌，不需要把个人 Token 填进项目。
 
-发布完成后核对 Actions 成功、Release 资产齐全。需要给别人使用时分享仓库首页或 Releases 链接，提醒对方下载 `.exe` 安装包；GitHub 自动生成的 Source code ZIP 是源码。
+发布完成后核对 Actions 成功、Release 资产齐全。需要给别人使用时分享仓库首页或 Releases 链接，提醒对方下载文件名带 `Setup` 的 `.exe` 安装包，`Portable` 是免安装便携版；GitHub 自动生成的 Source code ZIP 是源码。
 
 工作流自动执行需要仓库允许 GitHub Actions，并允许对应 Release 作业写入仓库。网络或构建失败时，不会把失败构建发布成新版；在 Actions 中查看具体错误后修正并重跑。
 
