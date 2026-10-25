@@ -6,6 +6,10 @@ const { validateConfig } = require('./engine.cjs');
 
 const FORMAT = 'local-commerce-content';
 const SETTING_KEYS = ['greetingEnabled', 'greeting', 'fallback', 'suffix', 'deliveryFallbackEnabled', 'deliveryFallback'];
+const SCOPE_KEYS = { all: SETTING_KEYS, replies: ['greetingEnabled', 'greeting', 'fallback'], delivery: ['suffix', 'deliveryFallbackEnabled', 'deliveryFallback'] };
+const scopeOf = pack => pack.version === 1 ? 'all' : pack.scope;
+const scopeLabel = scope => scope === 'replies' ? '智能答复规则' : '发货规则';
+function checkScope(scope) { if (!Object.hasOwn(SCOPE_KEYS, scope)) throw new TypeError('不支持的规则类别'); return scope; }
 const COMMON_KEYS = ['id', 'name', 'keywords', 'content', 'enabled'];
 const PRODUCT_KEYS = [...COMMON_KEYS, 'excludeKeywords', 'matchTarget'];
 const REPLY_KEYS = [...COMMON_KEYS, 'matchType', 'priority', 'delaySeconds', 'weekSlots'];
@@ -31,10 +35,11 @@ function shortText(value, max, label) {
 
 // This format contains content only. Platform sessions, tasks, receipts and media
 // upload URLs never enter the portable document.
-function exportSharedContent(input, { platform = 'pdd', now = new Date().toISOString() } = {}) {
+function exportSharedContent(input, { platform = 'pdd', now = new Date().toISOString(), scope = 'all' } = {}) {
+  checkScope(scope);
   const config = validateConfig(input);
   const row = (value, keys) => ({ ...pick(value, keys), needsMedia: value.images.length > 0 });
-  return validateSharedContent({
+  const pack = validateSharedContent({
     format: FORMAT, version: 1, exportedAt: now, source: { platform },
     content: {
       settings: pick(config, SETTING_KEYS),
@@ -46,17 +51,33 @@ function exportSharedContent(input, { platform = 'pdd', now = new Date().toISOSt
       excludedRules: config.replyRules.filter(value => value.matchType === 'system').map(value => ({ id: value.id, name: value.name, reason: 'platform_system' })),
     },
   });
+  return scope === 'all' ? pack : selectScope(pack, scope);
+}
+
+function selectScope(pack, scope) {
+  const actual = scopeOf(pack);
+  if (actual !== 'all' && actual !== scope) throw new TypeError(`请选择${scopeLabel(scope)}文件，当前文件是${scopeLabel(actual)}`);
+  if (actual === scope) return pack;
+  const settings = pick(pack.content.settings, SCOPE_KEYS[scope]);
+  return validateSharedContent({
+    format: FORMAT, version: 2, scope, exportedAt: pack.exportedAt, source: pack.source,
+    content: { settings, ...(scope === 'replies' ? { replyRules: pack.content.replyRules } : { products: pack.content.products }) },
+    review: { mediaSettings: pack.review.mediaSettings.filter(key => Object.hasOwn(settings, key)), excludedRules: scope === 'replies' ? pack.review.excludedRules : [] },
+  });
 }
 
 function validateSharedContent(value) {
-  object(value, ['format', 'version', 'exportedAt', 'source', 'content', 'review'], '共享文件');
-  if (value.format !== FORMAT || value.version !== 1) throw new TypeError('不支持的共享文字规则格式或版本');
+  object(value, ['format', 'version', 'exportedAt', 'source', 'content', 'review', ...(value?.version === 2 ? ['scope'] : [])], '共享文件');
+  if (value.format !== FORMAT || ![1, 2].includes(value.version)) throw new TypeError('不支持的共享文字规则格式或版本');
+  const scope = value.version === 1 ? 'all' : checkScope(value.scope);
+  if (value.version === 2 && scope === 'all') throw new TypeError('第 2 版文件必须指定智能答复或发货类别');
   if (typeof value.exportedAt !== 'string' || value.exportedAt.length > 40 || !Number.isFinite(Date.parse(value.exportedAt))) throw new TypeError('导出时间格式不正确');
   object(value.source, ['platform'], '来源');
   if (!['pdd', 'taobao'].includes(value.source.platform)) throw new TypeError('不支持的来源平台');
-  object(value.content, ['settings', 'products', 'replyRules'], '共享内容');
-  object(value.content.settings, SETTING_KEYS, '通用文案');
-  if (SETTING_KEYS.some(key => !Object.hasOwn(value.content.settings, key))) throw new TypeError('通用文案字段不完整');
+  const settingKeys = SCOPE_KEYS[scope];
+  object(value.content, ['settings', ...(scope !== 'replies' ? ['products'] : []), ...(scope !== 'delivery' ? ['replyRules'] : [])], '共享内容');
+  object(value.content.settings, settingKeys, '通用文案');
+  if (settingKeys.some(key => !Object.hasOwn(value.content.settings, key))) throw new TypeError('通用文案字段不完整');
   const normalizeRows = (rows, keys, kind) => {
     list(rows, 5000, kind);
     for (const row of rows) {
@@ -70,8 +91,9 @@ function validateSharedContent(value) {
   const config = validateConfig(value.content.settings);
   object(value.review, ['mediaSettings', 'excludedRules'], '待处理项目');
   list(value.review.mediaSettings, 3, '图片文案');
-  if (value.review.mediaSettings.some(scope => !GROUPS.some(group => group.scope === scope)) || new Set(value.review.mediaSettings).size !== value.review.mediaSettings.length) throw new TypeError('图片文案范围不正确');
+  if (value.review.mediaSettings.some(key => !GROUPS.some(group => group.scope === key) || !settingKeys.includes(key)) || new Set(value.review.mediaSettings).size !== value.review.mediaSettings.length) throw new TypeError('图片文案范围不正确');
   list(value.review.excludedRules, 5000, '平台系统规则');
+  if (scope === 'delivery' && value.review.excludedRules.length) throw new TypeError('发货文件不能包含答复系统规则');
   const ids = new Set();
   const excludedRules = value.review.excludedRules.map(row => {
     object(row, ['id', 'name', 'reason'], '平台系统规则');
@@ -80,27 +102,30 @@ function validateSharedContent(value) {
     ids.add(id);
     return { id, name, reason: 'platform_system' };
   });
-  const products = normalizeRows(value.content.products, PRODUCT_KEYS, '商品');
-  const replyRules = normalizeRows(value.content.replyRules, REPLY_KEYS, '答复');
+  const products = scope === 'replies' ? [] : normalizeRows(value.content.products, PRODUCT_KEYS, '商品');
+  const replyRules = scope === 'delivery' ? [] : normalizeRows(value.content.replyRules, REPLY_KEYS, '答复');
   if (replyRules.some(row => ids.has(row.id))) throw new TypeError('普通答复与平台系统规则编号不能重复');
   return {
-    format: FORMAT, version: 1, exportedAt: value.exportedAt, source: { platform: value.source.platform },
-    content: { settings: pick(config, SETTING_KEYS), products, replyRules },
+    format: FORMAT, version: value.version, ...(scope !== 'all' ? { scope } : {}), exportedAt: value.exportedAt, source: { platform: value.source.platform },
+    content: { settings: pick(config, settingKeys), ...(scope !== 'replies' ? { products } : {}), ...(scope !== 'delivery' ? { replyRules } : {}) },
     review: { mediaSettings: [...value.review.mediaSettings], excludedRules },
   };
 }
 
-function readSharedContent(value) {
-  if (value?.format === 'link-workbench-rules' && [1, 2].includes(value.version)) return exportSharedContent(value.config);
-  return validateSharedContent(value);
+function readSharedContent(value, { scope = 'all' } = {}) {
+  checkScope(scope);
+  if (value?.format === 'link-workbench-rules' && [1, 2].includes(value.version)) return exportSharedContent(value.config, { scope });
+  const pack = validateSharedContent(value);
+  return scope === 'all' ? pack : selectScope(pack, scope);
 }
 
-function previewSharedImport(input, currentInput, mode = 'merge') {
+function previewSharedImport(input, currentInput, mode = 'merge', { scope = 'all' } = {}) {
   if (!['merge', 'replace'].includes(mode)) throw new TypeError('请选择合并或替换');
-  const pack = readSharedContent(input), current = validateConfig(currentInput), next = structuredClone(current);
+  const pack = readSharedContent(input, { scope }), current = validateConfig(currentInput), next = structuredClone(current);
   const changes = [], warnings = [];
   const addWarning = (name, reason) => warnings.push({ name, reason });
   for (const group of GROUPS) {
+    if (!Object.hasOwn(pack.content.settings, group.scope)) continue;
     if (pack.review.mediaSettings.includes(group.scope) || current[group.images].length) {
       addWarning(group.label, '保留本机文案及图片，请在目标店铺单独配置图片');
       continue;
@@ -111,9 +136,12 @@ function previewSharedImport(input, currentInput, mode = 'merge') {
       next[key] = after;
     }
   }
-  changes.push({ kind: 'setting', id: 'suffix', name: '统一发货尾缀', action: current.suffix === pack.content.settings.suffix ? 'unchanged' : 'update', before: current.suffix, after: pack.content.settings.suffix });
-  next.suffix = pack.content.settings.suffix;
+  if (Object.hasOwn(pack.content.settings, 'suffix')) {
+    changes.push({ kind: 'setting', id: 'suffix', name: '统一发货尾缀', action: current.suffix === pack.content.settings.suffix ? 'unchanged' : 'update', before: current.suffix, after: pack.content.settings.suffix });
+    next.suffix = pack.content.settings.suffix;
+  }
   for (const key of ['products', 'replyRules']) {
+    if (!Object.hasOwn(pack.content, key)) continue;
     const kind = key === 'products' ? 'product' : 'reply';
     const previous = new Map(current[key].map(row => [row.id, row]));
     const incoming = new Map();
@@ -145,15 +173,15 @@ function previewSharedImport(input, currentInput, mode = 'merge') {
   const summary = Object.fromEntries(['add', 'update', 'remove', 'unchanged'].map(action => [action, changes.filter(row => row.action === action && row.kind !== 'setting').length]));
   summary.settings = changes.filter(row => row.kind === 'setting' && row.action !== 'unchanged').length;
   summary.review = warnings.length;
-  return { mode, source: pack.source.platform, summary, changes, warnings, config };
+  return { mode, scope: scopeOf(pack), source: pack.source.platform, summary, changes, warnings, config };
 }
 
 // Main-process-only draft: apply never accepts a renderer-supplied config or
 // re-reads a file that might have changed since preview.
 class SharedImportDraft {
   constructor() { this.draft = null; }
-  prepare(value, current, mode = 'merge') {
-    const pack = readSharedContent(value), preview = previewSharedImport(pack, current, mode);
+  prepare(value, current, mode = 'merge', { scope = 'all' } = {}) {
+    const pack = readSharedContent(value, { scope }), preview = previewSharedImport(pack, current, mode);
     const token = randomUUID();
     this.draft = { token, pack, mode, baseline: digest(current), config: preview.config };
     const { config, ...publicPreview } = preview;

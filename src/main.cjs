@@ -874,16 +874,19 @@ function registerIpc() {
     if (value?.format !== 'link-workbench-rules' || ![1,2].includes(value.version)) throw new Error('不是本软件的规则备份文件');
     pause(); engine.updateConfig({ ...value.config, running: false, autoReplyEnabled: false, autoDeliveryEnabled: false, autoRefundEnabled: false }); changed(); return snapshot();
   });
-  handle('content:export', async () => {
-    const result = await dialog.showSaveDialog(window, { title: '导出共享文字规则', defaultPath: '共享文字规则.json', filters: [{ name: 'JSON 文字规则', extensions: ['json'] }] });
+  const contentScope = scope => { if (!['replies', 'delivery'].includes(scope)) throw new Error('请选择智能答复或发货规则类别'); return scope === 'replies' ? '智能答复规则' : '发货规则'; };
+  handle('content:export', async ({ scope } = {}) => {
+    const label = contentScope(scope);
+    const result = await dialog.showSaveDialog(window, { title: '导出' + label, defaultPath: label + '.json', filters: [{ name: 'JSON 文字规则', extensions: ['json'] }] });
     if (result.canceled) return { cancelled: true };
-    const pack = exportSharedContent(engine.snapshot().config);
+    const pack = exportSharedContent(engine.snapshot().config, { scope });
     if (Buffer.byteLength(JSON.stringify(pack, null, 2), 'utf8') > 8 * 1024 * 1024) throw new Error('共享文字超过 8 MB，请拆分规则后导出');
     writeJson(result.filePath, pack);
-    return { path: result.filePath, reviewCount: pack.review.mediaSettings.length + pack.review.excludedRules.length + [...pack.content.products, ...pack.content.replyRules].filter(row => row.needsMedia).length };
+    return { path: result.filePath, reviewCount: pack.review.mediaSettings.length + pack.review.excludedRules.length + [...pack.content.products || [], ...pack.content.replyRules || []].filter(row => row.needsMedia).length };
   });
-  handle('content:preview', async () => {
-    const result = await dialog.showOpenDialog(window, { title: '预览共享文字规则（兼容旧规则备份）', properties: ['openFile'], filters: [{ name: 'JSON 文字规则 / 规则备份', extensions: ['json'] }] });
+  handle('content:preview', async ({ scope } = {}) => {
+    const label = contentScope(scope);
+    const result = await dialog.showOpenDialog(window, { title: '预览导入' + label + '（兼容旧规则备份）', properties: ['openFile'], filters: [{ name: 'JSON 文字规则 / 规则备份', extensions: ['json'] }] });
     if (result.canceled) return { cancelled: true };
     const file = result.filePaths[0];
     if (fs.statSync(file).size > 8 * 1024 * 1024) throw new Error('规则文件需要小于 8 MB');
@@ -891,7 +894,7 @@ function registerIpc() {
     if (bytes.length > 8 * 1024 * 1024) throw new Error('规则文件需要小于 8 MB');
     let value;
     try { value = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')); } catch { throw new Error('规则文件不是有效的 JSON，原文件已保留'); }
-    return sharedImport.prepare(value, engine.snapshot().config);
+    return sharedImport.prepare(value, engine.snapshot().config, 'merge', { scope });
   });
   handle('content:repreview', ({ token, mode }) => sharedImport.repreview(token, engine.snapshot().config, mode));
   handle('content:cancel', ({ token }) => { sharedImport.cancel(token); return true; });

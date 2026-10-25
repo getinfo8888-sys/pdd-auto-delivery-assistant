@@ -16,7 +16,7 @@ async function run({ app, window, engine, dataDir, configureTestPlatform }) {
   const baseline = engine.snapshot().config;
   const imported = { ...baseline, products: [product('guide', '领取地址：https://pan.example.test/guide?pwd=ABCD\n提取码：ABCD'), product('new', '请查看领取说明。')], replyRules: [reply('help'), reply('system-source', 'system')], suffix: '共享尾缀' };
   const shared = exportSharedContent(imported); shared.content.products[1].needsMedia = true;
-  const incomingFile = path.join(out, 'incoming.json'), exportFile = path.join(out, 'export.json'), legacyFile = path.join(out, 'legacy-v1.json');
+  const incomingFile = path.join(out, 'incoming.json'), exportFile = path.join(out, 'export.json'), replyExportFile = path.join(out, 'replies.json'), legacyFile = path.join(out, 'legacy-v1.json');
   fs.writeFileSync(incomingFile, JSON.stringify(shared));
   fs.writeFileSync(legacyFile, JSON.stringify({ format: 'link-workbench-rules', version: 1, config: imported }));
   let nextOpen = incomingFile, nextSave = exportFile;
@@ -33,24 +33,29 @@ async function run({ app, window, engine, dataDir, configureTestPlatform }) {
   const assertions = [];
   try {
     await ui('refresh(true)'); await click('[data-nav="settings"]');
-    await click('[data-action="shared-export"]');
+    await click('[data-action="shared-export"][data-scope="delivery"]');
     const exported = JSON.parse(fs.readFileSync(exportFile, 'utf8'));
     assert.equal(exported.format, 'local-commerce-content');
+    assert.equal(exported.scope, 'delivery'); assert.equal('replyRules' in exported.content, false);
     assert.equal(exported.content.products[0].content, '本机旧正文');
     assert.equal('autoRefundEnabled' in exported.content.settings, false);
     assert.deepEqual(engine.snapshot().config, baseline);
     assertions.push('export writes content only and leaves current settings intact');
 
-    nextSave = null; await click('[data-action="shared-export"]');
-    nextOpen = null; await click('[data-action="shared-import"]');
+    nextSave = replyExportFile; await click('[data-action="shared-export"][data-scope="replies"]');
+    const replyExport = JSON.parse(fs.readFileSync(replyExportFile, 'utf8'));
+    assert.equal(replyExport.scope, 'replies'); assert.equal('products' in replyExport.content, false);
+    assertions.push('reply and delivery export to separate files containing only their own category');
+
+    nextSave = null; await click('[data-action="shared-export"][data-scope="delivery"]');
+    nextOpen = null; await click('[data-action="shared-import"][data-scope="delivery"]');
     assert.equal(await ui('!!document.querySelector(".modal")'), false);
     assert.deepEqual(engine.snapshot().config, baseline);
     nextOpen = incomingFile;
-    await click('[data-action="shared-import"]');
-    assert.equal(await ui('sharedPreview.summary.add'), 2);
+    await click('[data-action="shared-import"][data-scope="delivery"]');
+    assert.equal(await ui('sharedPreview.summary.add'), 1);
     assert.equal(await ui('sharedPreview.summary.update'), 1);
     assert.match(await ui('document.querySelector(".shared-warnings").textContent'), /停用/);
-    assert.match(await ui('document.querySelector(".shared-warnings").textContent'), /系统规则/);
     await ui('document.querySelectorAll(".shared-change").forEach(node=>{node.open=node.querySelector("summary").textContent.includes("发货内容");});document.querySelector(".shared-changes").scrollIntoView({block:"start"});void 0;');
     assert.match(await ui('document.querySelector(".shared-changes").textContent'), /pan\.example\.test/);
     await wait(250);
@@ -62,15 +67,16 @@ async function run({ app, window, engine, dataDir, configureTestPlatform }) {
     assert.equal(fs.existsSync(path.join(dataDir, 'rule-backups')), false);
     assertions.push('canceling dialogs or preview never changes config; replace exposes deletions');
 
-    nextOpen = legacyFile; await click('[data-action="shared-import"]');
+    nextOpen = legacyFile; await click('[data-action="shared-import"][data-scope="delivery"]');
     assert.equal(await ui('sharedPreview.source'), 'pdd');
+    assert.equal(await ui('sharedPreview.scope'), 'delivery');
     await ui('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape"}));void 0;');
     assert.equal(await ui('sharedPreview'), null);
     assert.deepEqual(engine.snapshot().config, baseline);
     assertions.push('legacy v1 backup previews through the same UI and Escape cancels it');
 
     nextOpen = incomingFile; engine.setRunning(true);
-    await click('[data-action="shared-import"]');
+    await click('[data-action="shared-import"][data-scope="delivery"]');
     await click('[data-action="shared-apply"]');
     assert.match(await ui('document.querySelector("#toast").textContent'), /先暂停/);
     assert.equal(engine.snapshot().config.running, true);
@@ -91,7 +97,7 @@ async function run({ app, window, engine, dataDir, configureTestPlatform }) {
     assert.deepEqual(current.products.map(row => row.id), ['guide', 'keep', 'new']);
     assert.equal(current.products.find(row => row.id === 'new').enabled, false);
     assert.equal(current.products[0].content, shared.content.products[0].content);
-    assert.deepEqual(current.replyRules.map(row => row.id), ['system-local', 'help']);
+    assert.deepEqual(current.replyRules, baseline.replyRules);
     const backups = fs.readdirSync(path.join(dataDir, 'rule-backups'));
     assert.equal(backups.length, 1);
     const backup = JSON.parse(fs.readFileSync(path.join(dataDir, 'rule-backups', backups[0]), 'utf8'));
@@ -101,11 +107,18 @@ async function run({ app, window, engine, dataDir, configureTestPlatform }) {
     assertions.push('running guard and stale preview guard preserve current config', 'apply uses reviewed content, backs up original rules and disables automatic processing', 'local system rules and unrelated rows survive merge; media rows stay disabled', 'no platform writes, jobs or buyer messages are generated');
 
     // Also exercise the final replacement application, including its backup.
-    nextOpen = legacyFile; await click('[data-action="shared-import"]'); await click('[data-action="shared-replace"]'); await click('[data-action="shared-apply"]');
+    nextOpen = legacyFile; await click('[data-action="shared-import"][data-scope="delivery"]'); await click('[data-action="shared-replace"]'); await click('[data-action="shared-apply"]');
     assert.deepEqual(engine.snapshot().config.products.map(row => row.id), ['guide', 'new']);
+    assert.deepEqual(engine.snapshot().config.replyRules, baseline.replyRules);
+    const deliveryBeforeReplies = engine.snapshot().config.products;
+    await click('[data-action="shared-import"][data-scope="replies"]'); await click('[data-action="shared-replace"]'); await click('[data-action="shared-apply"]');
     assert.deepEqual(engine.snapshot().config.replyRules.map(row => row.id), ['system-local', 'help']);
-    assert.equal(fs.readdirSync(path.join(dataDir, 'rule-backups')).length, 2);
-    assertions.push('replacement applies only after preview and keeps local system rules');
+    assert.deepEqual(engine.snapshot().config.products, deliveryBeforeReplies);
+    assert.equal(fs.readdirSync(path.join(dataDir, 'rule-backups')).length, 3);
+    nextOpen = replyExportFile; await click('[data-action="shared-import"][data-scope="delivery"]');
+    assert.match(await ui('document.querySelector("#toast").textContent'), /当前文件/);
+    assert.equal(await ui('!!document.querySelector(".modal")'), false);
+    assertions.push('replacement affects only the selected category and keeps local system rules', 'wrong-category file is rejected without changing config');
     const result = { ok: true, assertions, platformWrites: platform.data.actions.length, dataDir };
     fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify(result));

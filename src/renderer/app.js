@@ -182,7 +182,7 @@ function settings() {
   <div><section class="panel"><div class="panel-head"><h2>本机运行</h2></div><div class="panel-body">${switchRow('打开软件自动监听','使用已开启的答复、发货和退款功能；需要登录或验证时，完成后自动继续。','autoListenOnLaunch',c.autoListenOnLaunch)}${switchRow('启动时补答待回复会话','分页检查近七天官方待回复聊天，按当前关键词或默认回复补答；已成功和结果不明的消息不重复发送。','catchUpUnrepliedEnabled',c.catchUpUnrepliedEnabled)}${switchRow('开机打开工作台','登录 Windows 后打开软件；是否自动监听由上面的开关决定。','startup',settingsDraft.startup ?? state.startup)}${button('收起到托盘','background')}<div class="small-note">修改设置会暂停本次监听。电脑关机、休眠或退出程序后无法继续处理。</div></div></section>
   <section class="panel"><div class="panel-head"><h2>待回复保障</h2></div><div class="panel-body"><p>重复拒绝后保留为“等待补答”，继续核验并重试。先尝试当前时间尾缀，再添加随机消息标记。每次启动重新检查，运行中每分钟复查。</p>${switchRow('多次判重后尝试正文随机空格','连续3次明确判重后，在汉字之间随机插入3个普通空格；保护链接和提取码，配置原文保留。','replyBodySpaceRetryEnabled',c.replyBodySpaceRetryEnabled)}<div class="small-note">安全位置不足时继续使用时间和消息标记。补答使用你配置的答复内容；发货正文不受影响。只有平台确认成功，或官方确认已有回复、出现新咨询时，才停止旧任务。断线或结果不明先核实，避免重复发送。</div></div></section>
   <section class="panel"><div class="panel-head"><h2>规则备份</h2></div><div class="panel-body"><div class="heading-actions">${button('导出规则','backup')}${button('导入规则','import')}</div><div class="small-note">备份包含规则与设置；导入后自动处理关闭。</div><button class="link-button" data-action="data-folder">打开本机数据目录 ↗</button></div></section>
-  <section class="panel"><div class="panel-head"><h2>共享文字规则</h2></div><div class="panel-body"><p>导出发货正文、智能答复和通用文案，方便后续在淘宝助手中复用。淘宝连接与自动同步尚未接入。</p><div class="heading-actions">${button('导出共享文字','shared-export')}${button('导入并预览','shared-import')}</div><p class="small-note">也可选择旧规则备份。导入前逐项预览；图片和平台专属规则需单独处理。先暂停监听再确认导入，原规则自动备份。</p></div></section>
+  <section class="panel"><div class="panel-head"><h2>规则迁移</h2></div><div class="panel-body"><p>淘宝助手单独运行，通过下面两类文件迁移规则。导入一类内容，不会覆盖另一类的内容。</p>${[['replies','智能答复规则','关键词、匹配方式、答复正文、欢迎语与默认答复'],['delivery','发货规则','商品 / SKU 关键词、排除词、网盘正文与发货尾缀']].map(([scope,label,description])=>`<h3>${label}</h3><p class="small-note">${description}</p><div class="heading-actions">${button('导出'+label,'shared-export',false,`data-scope="${scope}"`)}${button('导入并预览','shared-import',false,`data-scope="${scope}"`)}</div>`).join('')}<p class="small-note">兼容旧规则备份，仅提取所选类别。图片和平台专属规则需单独处理。先暂停监听再确认导入，原规则自动备份。</p></div></section>
   <section class="panel"><div class="panel-head"><h2>官方连接</h2></div><div class="panel-body"><p>${esc(state.connection.diagnostics.chat.message)}</p>${button('检测官方连接','check-platform')}${button('打开店铺页面','open-shop')}<div class="small-note">实际发送、确认发货和退款结果，请在运行记录中核对平台回执。</div></div></section><div class="small-note">拼多多自动发货助手 v${esc(state.version)}</div></div></div>`;
 }
 function refunds() {
@@ -238,16 +238,16 @@ function showSharedPreview(preview, reset=true) {
   sharedPreview=preview;if(reset)sharedPage=0;
   const {summary:s,changes,warnings}=preview, pageSize=40, pageCount=Math.max(1,Math.ceil(changes.length/pageSize));
   sharedPage=Math.min(sharedPage,pageCount-1);
-  const names={add:'新增',update:'覆盖',remove:'删除',unchanged:'相同'}, kinds={product:'发货内容',reply:'智能答复',setting:'通用文案'};
+  const names={add:'新增',update:'覆盖',remove:'删除',unchanged:'相同'}, kinds={product:'发货内容',reply:'智能答复',setting:'通用文案'}, category=preview.scope==='replies'?'智能答复规则':preview.scope==='delivery'?'发货规则':'文字规则';
   const rows=changes.slice(sharedPage*pageSize,(sharedPage+1)*pageSize);
   const body=`<div class="shared-mode"><span>导入方式</span>${button('合并：保留其他规则','shared-merge',preview.mode==='merge')}${button('替换：移除其他普通规则','shared-replace',preview.mode==='replace')}</div>
-    <p class="small-note">按规则编号识别覆盖；同名但编号不同会新增。本机平台系统规则始终保留。通用文案按下方预览更新。</p>
+    <p class="small-note">仅处理${category}。按规则编号识别覆盖；同名但编号不同会新增。本机平台系统规则始终保留。通用文案按下方预览更新。</p>
     <div class="shared-summary"><span>新增 <b>${s.add}</b></span><span>覆盖 <b>${s.update}</b></span><span>删除 <b>${s.remove}</b></span><span>相同 <b>${s.unchanged}</b></span><span>文案变更 <b>${s.settings}</b></span><span>待处理 <b>${s.review}</b></span></div>
     ${warnings.length?`<details class="shared-warnings" open><summary>${warnings.length} 项需要单独核对</summary><ul>${warnings.map(row=>`<li><strong>${esc(row.name)}</strong>：${esc(row.reason)}</li>`).join('')}</ul></details>`:''}
     <p class="small-note">确认后保存原规则备份，并关闭自动监听、答复、发货和退款。发送限制、登录会话和运行记录沿用本机。当前预览不会发送消息。</p>
     <div class="shared-changes">${rows.map(row=>`<details class="shared-change"><summary><span class="badge ${row.action==='remove'?'orange':row.action==='add'?'green':''}">${names[row.action]}</span><span>${kinds[row.kind]} · ${esc(row.name)}</span></summary><div class="small-note">编号：${esc(row.id)}</div><div class="shared-comparison"><div><h3>本机原内容</h3><pre>${esc(sharedValue(row.before))}</pre></div><div><h3>导入后内容</h3><pre>${esc(sharedValue(row.after))}</pre></div></div></details>`).join('') || '<p class="small-note">没有可导入的文字内容。</p>'}</div>
     <div class="shared-pagination">${button('上一页','shared-prev',false,sharedPage===0?'disabled':'')}<span>第 ${sharedPage+1} / ${pageCount} 页 · 共 ${changes.length} 项</span>${button('下一页','shared-next',false,sharedPage===pageCount-1?'disabled':'')}</div>`;
-  openModal('导入共享文字规则',`来源：${preview.source==='pdd'?'拼多多':'淘宝'} · 先展开内容核对，再确认导入。`,body,`${button('取消','close-modal')}${button('刷新预览','shared-refresh')}${button('确认导入并关闭自动处理','shared-apply',true)}`,true);
+  openModal('导入'+category,`来源：${preview.source==='pdd'?'拼多多':'淘宝'} · 先展开内容核对，再确认导入。`,body,`${button('取消','close-modal')}${button('刷新预览','shared-refresh')}${button('确认导入并关闭自动处理','shared-apply',true)}`,true);
 }
 function editRule(type,id) {
   const isProduct=type==='product';
@@ -300,8 +300,8 @@ function jobDetail(id) {
   }
 }
 async function action(name, target) {
-  if(name==='shared-export') {const result=await call('content:export');if(!result.cancelled)toast(result.reviewCount?`共享文字已导出；${result.reviewCount} 项图片或平台规则需单独配置`:'共享文字已导出');return;}
-  if(name==='shared-import') {const result=await call('content:preview');if(!result.cancelled)showSharedPreview(result);return;}
+  if(name==='shared-export') {const result=await call('content:export',{scope:target.dataset.scope});if(!result.cancelled)toast(result.reviewCount?`规则已导出；${result.reviewCount} 项图片或平台规则需单独配置`:'规则已导出');return;}
+  if(name==='shared-import') {const result=await call('content:preview',{scope:target.dataset.scope});if(!result.cancelled)showSharedPreview(result);return;}
   if(['shared-merge','shared-replace','shared-refresh'].includes(name)&&sharedPreview) {
     const token=sharedPreview.token,mode=name==='shared-refresh'?sharedPreview.mode:name==='shared-replace'?'replace':'merge';
     const result=await call('content:repreview',{token,mode});

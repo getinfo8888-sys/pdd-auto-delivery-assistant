@@ -69,6 +69,65 @@ test('identical rules are recognized despite object field ordering, with no repe
   assert.equal(preview.summary.settings, 0);
 });
 
+test('separate exports contain only the selected category, including its text settings and review', () => {
+  const config = source({ greetingImages: [image], deliveryFallbackImages: [image], replyRules: [reply(), reply('system', { matchType: 'system' })] });
+  const replies = exportSharedContent(config, { scope: 'replies' }), delivery = exportSharedContent(config, { scope: 'delivery' });
+  assert.equal(replies.version, 2); assert.equal(replies.scope, 'replies');
+  assert.deepEqual(Object.keys(replies.content).sort(), ['replyRules', 'settings']);
+  assert.deepEqual(Object.keys(replies.content.settings).sort(), ['fallback', 'greeting', 'greetingEnabled']);
+  assert.deepEqual(replies.review.mediaSettings, ['greeting']);
+  assert.equal(replies.review.excludedRules.length, 1);
+  assert.deepEqual(Object.keys(delivery.content).sort(), ['products', 'settings']);
+  assert.deepEqual(Object.keys(delivery.content.settings).sort(), ['deliveryFallback', 'deliveryFallbackEnabled', 'suffix']);
+  assert.deepEqual(delivery.review.mediaSettings, ['deliveryFallback']);
+  assert.deepEqual(delivery.review.excludedRules, []);
+  for (const value of [replies, delivery]) assert.deepEqual(validateSharedContent(JSON.parse(JSON.stringify(value))), value);
+});
+
+test('replace of one category leaves all content and media of the other category unchanged', () => {
+  const current = source({ products: [product('local', { images: [image] })], suffix: '本机发货尾缀', deliveryFallbackImages: [image], replyRules: [reply('local', { images: [image] })], greetingImages: [image], fallbackImages: [image] });
+  for (const scope of ['replies', 'delivery']) {
+    const preview = previewSharedImport(exportSharedContent(source(), { scope }), current, 'replace');
+    const untouched = scope === 'replies' ? ['products', 'suffix', 'deliveryFallback', 'deliveryFallbackEnabled', 'deliveryFallbackImages'] : ['replyRules', 'greeting', 'greetingEnabled', 'greetingImages', 'fallback', 'fallbackImages'];
+    for (const key of untouched) assert.deepEqual(preview.config[key], current[key], scope + ':' + key);
+    assert.equal(preview.scope, scope);
+    assert.ok(preview.changes.every(row => row.kind !== (scope === 'replies' ? 'product' : 'reply')));
+  }
+});
+
+test('legacy combined formats are filtered by the selected category and retain media review', () => {
+  const config = source({ products: [product('guide', { images: [image] })], replyRules: [reply('help', { images: [image] })] });
+  const values = [exportSharedContent(config), ...[1, 2].map(version => ({ format: 'link-workbench-rules', version, config }))];
+  for (const value of values) for (const scope of ['replies', 'delivery']) {
+    const selected = readSharedContent(value, { scope });
+    assert.equal(selected.scope, scope);
+    assert.equal(selected.content[scope === 'replies' ? 'replyRules' : 'products'][0].needsMedia, true);
+    assert.equal(Object.hasOwn(selected.content, scope === 'replies' ? 'products' : 'replyRules'), false);
+  }
+});
+
+test('category mismatch and hidden opposite-category fields are rejected instead of silently discarded', () => {
+  for (const scope of ['replies', 'delivery']) {
+    const value = exportSharedContent(source(), { scope }), other = scope === 'replies' ? 'delivery' : 'replies';
+    assert.throws(() => readSharedContent(value, { scope: other }), /当前文件/);
+    const hidden = structuredClone(value); hidden.content[scope === 'replies' ? 'products' : 'replyRules'] = [];
+    assert.throws(() => validateSharedContent(hidden));
+    const settings = structuredClone(value); settings.content.settings[scope === 'replies' ? 'suffix' : 'greeting'] = '隐藏正文';
+    assert.throws(() => validateSharedContent(settings));
+  }
+  assert.throws(() => exportSharedContent(source(), { scope: 'unknown' }));
+  const value = exportSharedContent(source(), { scope: 'delivery' }); value.scope = 'all';
+  assert.throws(() => validateSharedContent(value));
+});
+
+test('category remains fixed when refreshing preview and switching replacement mode', () => {
+  const session = new SharedImportDraft(), current = source();
+  const preview = session.prepare(pack(), current, 'merge', { scope: 'replies' });
+  const refreshed = session.repreview(preview.token, current, 'replace');
+  assert.equal(refreshed.scope, 'replies');
+  session.apply(refreshed.token, current, { idle: true, backup: () => {}, update: config => assert.deepEqual(config.products, current.products) });
+});
+
 test('replace previews deletions but retains local platform system rules and conflicts', () => {
   const current = source({ products: [product('old')], replyRules: [reply('old'), reply('help', { matchType: 'system' }), reply('system', { matchType: 'system' })] });
   const preview = previewSharedImport(pack(), current, 'replace');
