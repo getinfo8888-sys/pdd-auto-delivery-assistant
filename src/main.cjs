@@ -5,6 +5,7 @@ const { createHash } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { Engine, matchProduct, planDelivery, validateConfig, defaults } = require('./core/engine.cjs');
 const { validateImages } = require('./core/message-parts.cjs');
+const { exportSharedContent, SharedImportDraft } = require('./core/shared-content.cjs');
 const { StartupListener } = require('./core/startup-listener.cjs');
 const { NetworkRefresh } = require('./core/network-refresh.cjs');
 const { CapabilityRecovery, pageRefreshDecision } = require('./core/capability-recovery.cjs');
@@ -17,6 +18,7 @@ const { makePageStatusScript } = require('./platform/page-status.cjs');
 const capabilitySmoke = !app.isPackaged && process.argv.includes('--capability-smoke');
 const startupSmoke = !app.isPackaged && process.argv.includes('--startup-smoke');
 const layoutSmoke = !app.isPackaged && process.argv.includes('--layout-smoke');
+const sharedRulesSmoke = !app.isPackaged && process.argv.includes('--shared-rules-smoke');
 const liveWireAudit = !app.isPackaged && process.argv.includes('--audit-live-wire');
 const pendingReplyAudit = !app.isPackaged && process.argv.includes('--audit-live-pending');
 const catchUpReadOnly = !app.isPackaged && process.argv.includes('--catchup-readonly');
@@ -24,7 +26,7 @@ const networkReadOnly = !app.isPackaged && process.argv.includes('--network-read
 const imageUploadAudit = !app.isPackaged && process.argv.includes('--image-upload-audit');
 const popupCleanupAudit = !app.isPackaged && process.argv.includes('--popup-cleanup-audit');
 const receiptReadOnly = !app.isPackaged && process.argv.includes('--receipt-readonly');
-const smokeMode = !app.isPackaged && (process.argv.includes('--smoke-test') || startupSmoke || layoutSmoke || capabilitySmoke);
+const smokeMode = !app.isPackaged && (process.argv.includes('--smoke-test') || startupSmoke || layoutSmoke || capabilitySmoke || sharedRulesSmoke);
 const platformReadOnly = !app.isPackaged && process.argv.includes('--platform-readonly');
 const workflowReadOnly = !app.isPackaged && process.argv.includes('--workflow-readonly');
 const readOnlyDiagnostic = !app.isPackaged && (process.argv.includes('--read-only-diagnostic') || platformReadOnly || workflowReadOnly || catchUpReadOnly || networkReadOnly || popupCleanupAudit || receiptReadOnly);
@@ -34,6 +36,7 @@ let window, tray, trayMenu, engine, profile, dataDir, selectedKind = 'chat', bro
 let startedAt = 0;
 let stateRevision=0;
 let testPlatform=null;
+const sharedImport = new SharedImportDraft();
 let connectedShopId = '', dispatching = false, dispatchTimer, pendingReplyTimer;
 let orderPage = 1, refundPage = 1;
 let bridgeAvailable=false, pollFailures=0, nextPollAt=0;
@@ -871,6 +874,42 @@ function registerIpc() {
     if (value?.format !== 'link-workbench-rules' || ![1,2].includes(value.version)) throw new Error('不是本软件的规则备份文件');
     pause(); engine.updateConfig({ ...value.config, running: false, autoReplyEnabled: false, autoDeliveryEnabled: false, autoRefundEnabled: false }); changed(); return snapshot();
   });
+  handle('content:export', async () => {
+    const result = await dialog.showSaveDialog(window, { title: '导出共享文字规则', defaultPath: '共享文字规则.json', filters: [{ name: 'JSON 文字规则', extensions: ['json'] }] });
+    if (result.canceled) return { cancelled: true };
+    const pack = exportSharedContent(engine.snapshot().config);
+    if (Buffer.byteLength(JSON.stringify(pack, null, 2), 'utf8') > 8 * 1024 * 1024) throw new Error('共享文字超过 8 MB，请拆分规则后导出');
+    writeJson(result.filePath, pack);
+    return { path: result.filePath, reviewCount: pack.review.mediaSettings.length + pack.review.excludedRules.length + [...pack.content.products, ...pack.content.replyRules].filter(row => row.needsMedia).length };
+  });
+  handle('content:preview', async () => {
+    const result = await dialog.showOpenDialog(window, { title: '预览共享文字规则（兼容旧规则备份）', properties: ['openFile'], filters: [{ name: 'JSON 文字规则 / 规则备份', extensions: ['json'] }] });
+    if (result.canceled) return { cancelled: true };
+    const file = result.filePaths[0];
+    if (fs.statSync(file).size > 8 * 1024 * 1024) throw new Error('规则文件需要小于 8 MB');
+    const bytes = fs.readFileSync(file);
+    if (bytes.length > 8 * 1024 * 1024) throw new Error('规则文件需要小于 8 MB');
+    let value;
+    try { value = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')); } catch { throw new Error('规则文件不是有效的 JSON，原文件已保留'); }
+    return sharedImport.prepare(value, engine.snapshot().config);
+  });
+  handle('content:repreview', ({ token, mode }) => sharedImport.repreview(token, engine.snapshot().config, mode));
+  handle('content:cancel', ({ token }) => { sharedImport.cancel(token); return true; });
+  handle('content:apply', ({ token }) => {
+    if (readOnlyDiagnostic) throw new Error('只读联调不允许导入规则');
+    const current = engine.snapshot();
+    const idle = !listenIntent && !startupListener?.active && !dispatching && !polling && !capabilityBusy.size && !reconciling && !startPromise && !catchUpCollecting && !networkRefreshBusy && !current.jobs.some(job => !job.simulation && job.status === 'sending');
+    let backupPath;
+    sharedImport.apply(token, current.config, { idle,
+      backup: config => {
+        const directory = path.join(dataDir, 'rule-backups'); fs.mkdirSync(directory, { recursive: true });
+        backupPath = path.join(directory, 'before-shared-import-' + Date.now() + '-' + token + '.json');
+        writeJson(backupPath, { format: 'link-workbench-rules', version: 2, exportedAt: new Date().toISOString(), config });
+      },
+      update: config => { pause(); engine.updateConfig(config); changed(); },
+    });
+    return { state: snapshot(), backupPath };
+  });
   handle('settings:startup', value => { app.setLoginItemSettings({ openAtLogin: value === true }); return snapshot(); });
   handle('app:data-folder', () => shell.openPath(dataDir));
   handle('app:background', () => { window.hide(); return true; });
@@ -912,7 +951,7 @@ else {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(uiUrl)) event.preventDefault(); });
     registerIpc(); window.loadURL(uiUrl);
-    if (smoke) window.webContents.once('did-finish-load', () => require(layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
+    if (smoke) window.webContents.once('did-finish-load', () => require(sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
     if (!smoke && !readOnlyDiagnostic && !liveWireAudit && !pendingReplyAudit && !imageUploadAudit && !process.argv.includes('--start-paused')) window.webContents.once('did-finish-load', () => startupListener.arm(engine.snapshot().config));
     if (imageUploadAudit) window.webContents.once('did-finish-load',()=>require('../scripts/image-upload-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('图片检查失败：'+error.message);app.exit(1);}));
     if (popupCleanupAudit) window.webContents.once('did-finish-load',()=>require('../scripts/popup-cleanup-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('弹窗检查失败：'+error.message);app.exit(1);}));
