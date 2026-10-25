@@ -1,6 +1,6 @@
 {
   "name": "pdd-auto-delivery-assistant",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "拼多多商家本地智能答复与自动发货工具",
   "private": true,
   "main": "src/main.cjs",
