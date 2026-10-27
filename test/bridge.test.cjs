@@ -162,6 +162,39 @@ test('both pending lists recover the buyer message behind an official automatic 
   }
 });
 
+const platformWaitHint=(extra={})=>pendingRow({msg_id:'wait-notice',type:51,no_unreply_hint:1,content:'等待提醒（隔离样本）',ts:Math.floor(Date.now()/1000),...extra});
+test('pending scans and preflight recover the real inquiry hidden behind a platform wait notice',async()=>{
+  for(const action of ['unreplied','unreplied-history','reply-check']){
+    const notice=platformWaitHint(),source=historySource({ts:notice.last_unreply_time,content:'https://example.test/goods/demo'});
+    const context=historySource({msg_id:'goods-context',type:41,no_unreply_hint:1,ts:notice.ts});
+    const warning=historyWelcome({msg_id:'platform-warning',type:31,no_unreply_hint:1,ts:source.ts});
+    const page={result:'ok',conversations:[notice],has_more:false};
+    const f=fixture({pendingList:page,history:page,latest:{result:'ok',uid:'123',conversation:notice},conversationHistory:{result:'ok',messages:[context,notice,warning,source]}});
+    const result=await f.run(action,{page:1,buyerId:'123'}),message=action==='reply-check'?result.message:result.messages[0];
+    assert.equal(result.ready,true);assert.ok(message);assert.equal(message.messageId,source.msg_id);assert.equal(message.text,source.content);
+    assert.deepEqual(message.platformHintPending,{hintMessageId:notice.msg_id,sourceMessageId:source.msg_id,pendingSince:notice.last_unreply_time*1000,historyVerified:true});
+    assert.equal(f.calls.some(row=>row.send||row.httpSend||row.socketSend),false);assert.equal(f.api.send,f.originalSend);
+    assert.equal(f.calls.find(row=>row.listArgs).listArgs.notUpdateUnreplyTs,true);
+  }
+});
+
+test('platform notices cannot override a later real reply or a cleared pending marker',async()=>{
+  const notice=platformWaitHint(),source=historySource({ts:notice.last_unreply_time});
+  const manual=historyWelcome({msg_id:'human-answer',ts:notice.ts+1});
+  const answered=fixture({latest:{result:'ok',uid:'123',conversation:notice},conversationHistory:{result:'ok',messages:[manual,notice,source]}});
+  assert.equal((await answered.run('reply-check',{buyerId:'123'})).pending,false);
+  const cleared=fixture({latest:{result:'ok',uid:'123',conversation:{...notice,last_unreply_time:0}}});
+  assert.equal((await cleared.run('reply-check',{buyerId:'123'})).pending,false);assert.equal(cleared.calls.some(row=>row.listRead),false);
+});
+
+test('missing or mismatched platform-notice history is deferred rather than declared answered',async()=>{
+  const notice=platformWaitHint(),source=historySource({ts:notice.last_unreply_time});
+  for(const messages of [[],[source],[{...notice,to:{uid:'another-merchant',role:'mall_cs'}},source]]){
+    const f=fixture({latest:{result:'ok',uid:'123',conversation:notice},conversationHistory:{result:'ok',messages}});
+    assert.equal((await f.run('reply-check',{buyerId:'123'})).ready,false);assert.equal(f.api.send,f.originalSend);
+  }
+});
+
 test('a human reply and a cleared official pending marker still prevent an automatic reply',async()=>{
   for(const auto of [historyWelcome(),officialAuto({last_unreply_time:0}),officialAuto({need_reply:0})]){
     const f=fixture({latest:{result:'ok',uid:'123',conversation:auto},conversationHistory:{result:'ok',messages:[auto,historySource()]}});

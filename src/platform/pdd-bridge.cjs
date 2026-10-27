@@ -98,20 +98,24 @@ async function bridgeRuntime(action, payload) {
   async function pendingConversation(row, requirePendingTime = true) {
     const incoming = pendingMessage(row, requirePendingTime);
     if (incoming) return incoming;
-    // The official pending endpoints can return the robot's last outgoing
-    // bubble, with need_reply=1, rather than the buyer's unanswered inquiry.
-    // is_aut is also zero on these observed robot messages; it is not a sender
-    // classification. Resolve the source with read-only, newest-first history.
+    // A robot bubble or platform notice can hide the unanswered inquiry in
+    // both pending lists and the latest-per-buyer response. The wait notice
+    // (51) is incoming with no_unreply_hint=1 but retains last_unreply_time.
+    // Resolve its source through read-only history without clearing that time.
     const pendingSince = Number(row.last_unreply_time) * 1000;
-    if (!officialAutomatic(row) || !marked(row.need_reply) || !(pendingSince > 0)) return null;
-    const buyerId = id(row.to?.uid), automaticMessageId = id(row.msg_id);
+    const notice = [31,41,51,56].includes(numeric(row.type));
+    if ((!notice && (!officialAutomatic(row) || !marked(row.need_reply))) || !(pendingSince > 0)) return null;
     const merchantUid = id(store?.state?.userInfo?.uid), api = chatApi();
-    if (!buyerId || !automaticMessageId || row.to?.role !== 'user' || id(row.from?.uid) !== merchantUid) throw Error('官方自动回复的会话身份不完整');
-    if (typeof api.list !== 'function' || typeof api.send !== 'function') throw Error('官方自动回复后的历史核验接口尚未就绪');
+    const incomingNotice = notice && row.from?.role === 'user' && row.to?.role === 'mall_cs' && id(row.to.uid) === merchantUid;
+    const outgoingMarker = row.from?.role === 'mall_cs' && id(row.from.uid) === merchantUid && row.to?.role === 'user';
+    const buyerId = incomingNotice ? id(row.from.uid) : outgoingMarker ? id(row.to.uid) : '';
+    const markerMessageId = id(row.msg_id);
+    if (!buyerId || !markerMessageId) throw Error('官方待回复提示的会话身份不完整');
+    if (typeof api.list !== 'function' || typeof api.send !== 'function') throw Error('官方待回复历史核验接口尚未就绪');
     const data = await new Promise((resolve, reject) => {
       let captured = false;
       const original = api.send;
-      const timer = setTimeout(() => reject(Error('核验官方自动回复后的待答复消息超时')), 12000);
+      const timer = setTimeout(() => reject(Error('核验官方提示后的待答复消息超时')), 12000);
       const failed = error => { clearTimeout(timer); reject(error); };
       const capture = function(packet, callback, ...rest) {
         if (!captured && packet?.cmd === 'list' && packet.list?.with?.role === 'user' && id(packet.list.with.id) === buyerId && packet.list.size === 30 && packet.notUpdateUnreplyTs === true) {
@@ -123,39 +127,46 @@ async function bridgeRuntime(action, payload) {
         return original.call(this, packet, callback, ...rest);
       };
       api.send = capture;
-      try { api.list({user_sn:buyerId,size:30,notUpdateUnreplyTs:true}); if (!captured) failed(Error('官方自动回复历史请求契约已变化')); }
+      try { api.list({user_sn:buyerId,size:30,notUpdateUnreplyTs:true}); if (!captured) failed(Error('官方待回复历史请求契约已变化')); }
       catch (error) { failed(error); }
       finally { if (api.send === capture) api.send = original; }
     });
     assertShop();
-    if (id(store?.state?.userInfo?.uid) !== merchantUid || data?.result !== 'ok' || !Array.isArray(data.messages) || data.messages.length > 30 || Object.hasOwn(data, 'uid') && id(data.uid) !== buyerId || Object.hasOwn(data, 'user_sn') && id(data.user_sn) !== buyerId) throw Error('官方自动回复历史响应不完整');
-    const effective = [], ids = new Set(); let foundAutomatic = false;
+    if (id(store?.state?.userInfo?.uid) !== merchantUid || data?.result !== 'ok' || !Array.isArray(data.messages) || data.messages.length > 30 || Object.hasOwn(data, 'uid') && id(data.uid) !== buyerId || Object.hasOwn(data, 'user_sn') && id(data.user_sn) !== buyerId) throw Error('官方待回复历史响应不完整');
+    const effective = [], ids = new Set(); let foundMarker = false;
     const hint = value => {
       if (value === undefined || value === null || value === false || value === 0 || value === '0') return false;
       if (marked(value)) return true;
-      throw Error('官方自动回复历史提示标记无法识别');
+      throw Error('官方待回复历史提示标记无法识别');
     };
     for (const message of data.messages) {
       const messageId = id(message?.msg_id), ts = Number(message?.ts);
-      if (!messageId || ids.has(messageId) || numeric(message?.type) === null || !Number.isFinite(ts) || ts <= 946684800 || ts >= 4102444800) throw Error('官方自动回复历史缺少有效的编号、类型或时间');
+      if (!messageId || ids.has(messageId) || numeric(message?.type) === null || !Number.isFinite(ts) || ts <= 946684800 || ts >= 4102444800) throw Error('官方待回复历史缺少有效的编号、类型或时间');
       ids.add(messageId);
-      if (hint(message.no_unreply_hint) || hint(message.is_system_hint_mall) || [31,56].includes(numeric(message.type)) || message.from?.role === 'user' && Number(message.from.user_type) === 6) continue;
       const incoming = message.from?.role === 'user' && id(message.from.uid) === buyerId && message.to?.role === 'mall_cs' && id(message.to.uid) === merchantUid;
       const outgoing = message.from?.role === 'mall_cs' && id(message.from.uid) === merchantUid && message.to?.role === 'user' && id(message.to.uid) === buyerId;
-      if (!incoming && !outgoing) throw Error('官方自动回复历史的会话身份不一致');
+      if (hint(message.no_unreply_hint) || hint(message.is_system_hint_mall) || [31,41,51,56].includes(numeric(message.type)) || message.from?.role === 'user' && Number(message.from.user_type) === 6) {
+        if (notice && messageId === markerMessageId) {
+          if (!incoming && !outgoing) throw Error('官方提示历史的会话身份不一致');
+          foundMarker = true;
+        }
+        continue;
+      }
+      if (!incoming && !outgoing) throw Error('官方待回复历史的会话身份不一致');
       if (officialAutomatic(message)) {
-        if (messageId === automaticMessageId) foundAutomatic = true;
+        if (!notice && messageId === markerMessageId) foundMarker = true;
         continue;
       }
       effective.push({message,incoming});
     }
-    if (!foundAutomatic || !effective.length) throw Error('尚未取得完整的官方自动回复及买家咨询，稍后重新核验');
+    if (!foundMarker || !effective.length) throw Error('尚未取得完整的官方提示及买家咨询，稍后重新核验');
     if (!effective[0].incoming) return null; // A subsequent real merchant reply wins.
     const source = effective[0].message;
     if (Number(source.ts) * 1000 < pendingSince) throw Error('官方待回复时间与买家咨询尚未同步');
     const message = pendingMessage({...source,last_unreply_time:pendingSince/1000});
     if (!message) return null;
-    message.officialAutoReplyPending = {automaticMessageId,sourceMessageId:message.messageId,pendingSince,historyVerified:true};
+    if (notice) message.platformHintPending = {hintMessageId:markerMessageId,sourceMessageId:message.messageId,pendingSince,historyVerified:true};
+    else message.officialAutoReplyPending = {automaticMessageId:markerMessageId,sourceMessageId:message.messageId,pendingSince,historyVerified:true};
     return message;
   }
   const orderProjection = row => {

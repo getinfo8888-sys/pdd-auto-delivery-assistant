@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const wait = ms => new Promise(resolve=>setTimeout(resolve,ms));
-async function run({ app, window, tray, trayMenu, engine, dataDir, configureTestPlatform }) {
+async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendingReplies, configureTestPlatform }) {
   const platform=require('./fixture-platform.cjs').createPlatform();configureTestPlatform(platform);
   engine.updateConfig({...engine.snapshot().config,suffix:'打开链接领取资源，也可以复制本条消息到对应网盘。'});
   const out=path.resolve(__dirname,'..','work'); fs.mkdirSync(out,{recursive:true});
@@ -185,6 +185,20 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, configureTest
   await click('[data-nav="records"]');const mediaParent=engine.snapshot().jobs.find(row=>row.orderId===mediaOrder.orderId&&!row.parentJobId&&row.type==='delivery');await click(`[data-action="job"][data-id="${mediaParent.id}"]`);
   assert.match(await evalUi(`document.querySelector('.media-editor').textContent`),/纯链接.*平台已确认.*图片.*平台已确认/su);
   fs.writeFileSync(path.join(out,'message-parts-detail.png'),(await window.webContents.capturePage()).toPNG());await click('[data-action="close-modal"]');
+  // This offline inquiry is absent from live chat. A platform wait notice is
+  // the only live event; periodic pending recovery must find its real source.
+  engine.updateConfig({...engine.snapshot().config,autoReplyEnabled:true,catchUpUnrepliedEnabled:true});
+  const coveredInquiry={shopId:platform.data.shopId,buyerId:'notice-covered-buyer',messageId:'offline-real-inquiry',text:'如何领取资源（隔离样本）',direction:'incoming',pending:true,sentAt:Date.now()-2*3600000};
+  coveredInquiry.platformHintPending={hintMessageId:'offline-wait-notice',sourceMessageId:coveredInquiry.messageId,pendingSince:coveredInquiry.sentAt,historyVerified:true};
+  platform.data.messages.push({...coveredInquiry,messageId:'offline-wait-notice',type:'51',noUnreplyHint:true,text:'平台等待提醒（隔离样本）'});
+  platform.data.unreplied.push(coveredInquiry);
+  await maintainPendingReplies(true);
+  await until(()=>engine.snapshot().jobs.some(row=>row.messageId===coveredInquiry.messageId&&row.status==='sent'),'platform notice does not hide the recovered inquiry');
+  const coveredReply=engine.snapshot().jobs.find(row=>row.messageId===coveredInquiry.messageId);
+  assert.equal(coveredReply.content,engine.snapshot().config.fallback);assert.ok(coveredReply.sentMessageId);
+  assert.ok(engine.snapshot().logs.some(row=>row.jobId===coveredReply.id&&row.code==='platform_hint_pending_queued'));
+  await maintainPendingReplies(true);
+  assert.equal(platform.data.actions.filter(row=>row.jobId===coveredReply.id).length,1);
   const nativeTrayWindowVisibilityVerified=!window.webContents.isOffscreen();
   trayMenu.items.find(item=>item.label==='打开工作台').click();await wait(200);if(nativeTrayWindowVisibilityVerified)assert.equal(window.isVisible(),true);
   window.close();await wait(100);assert.equal(window.isVisible(),false);assert.equal(window.isDestroyed(),false);assert.equal(engine.snapshot().config.running,true);
@@ -195,6 +209,7 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, configureTest
   results.assertions.push('unmatched delivery default is configured through UI and IPC','unmatched title and SKU preview the default without sending','confirmed default delivery precedes automatic shipment');
   results.assertions.push('window Close hides to the tray without pausing listening','hidden workbench continues discovering and delivering orders','delivery rejection retries automatically with a visible deadline','tray Open restores the existing window');
   results.backgroundRejectedAttempts=backgroundRejectedAttempts;
+  results.assertions.push('a platform notice cannot hide an offline pending inquiry from maintenance','notice-covered inquiry uses configured fallback and requires a receipt','a second scan does not duplicate a notice-covered reply');
   results.assertions.push('local image selection saves metadata without sending to a buyer','image editor restores saved attachments','standalone URL setting auto-saves across navigation','text then exact URL then image precede shipment','image rejection persists and retries without resending previous parts','part receipts are visible in processing details');
   results.fixtureAssetUploads=fixtureAssetUploads;results.imageRejections=imageRejections;
   results.nativeTrayWindowVisibilityVerified=nativeTrayWindowVisibilityVerified;

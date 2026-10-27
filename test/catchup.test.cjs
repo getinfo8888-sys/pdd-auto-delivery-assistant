@@ -68,6 +68,32 @@ test('robot evidence cannot override a different human reply or a sent or uncert
   }
 });
 
+test('verified platform-notice history recovers an unsent preflight cancellation across restarts',async t=>{
+  const f=fixture(t),source=f.message();f.response({status:'skipped',reason:'会话已有回复'});
+  const original=f.engine.recoverUnrepliedMessage(source);await f.engine.dispatch(original.job.id);
+  const loaded=f.create();loaded.setRunning(true);
+  const proof={hintMessageId:'wait-notice',sourceMessageId:source.messageId,pendingSince:source.sentAt,historyVerified:true};
+  const recovery=loaded.recoverUnrepliedMessage({...source,platformHintPending:proof});
+  assert.equal(recovery.status,'created');assert.equal(recovery.job.platformHintRecoveryJobId,original.job.id);
+  assert.equal(recovery.job.needsReplyVerification,true);assert.equal(recovery.job.content,'试玩内容');
+  assert.equal(loaded.recoverUnrepliedMessage({...source,platformHintPending:proof}).status,'queued');
+  assert.ok(loaded.snapshot().logs.some(row=>row.code==='platform_hint_pending_queued'));
+});
+
+test('platform-notice evidence never overrides genuine human intervention or a confirmed or uncertain send',async t=>{
+  for(const status of ['human','sent','uncertain']){
+    const f=fixture(t),source=f.message(),job=f.engine.ingestMessage(source);
+    if(status==='human')f.engine.ingestMessage({...source,messageId:'human-answer',direction:'outgoing',text:'人工答复',sentAt:source.sentAt+1000});
+    else{f.response(status==='sent'?{status:'confirmed',messageId:'server-receipt'}:{status:'uncertain'});await f.engine.dispatch(job.id);}
+    const proof={hintMessageId:'wait-notice',sourceMessageId:source.messageId,pendingSince:source.sentAt,historyVerified:true};
+    assert.notEqual(f.engine.recoverUnrepliedMessage({...source,platformHintPending:proof}).status,'created');
+  }
+  const f=fixture(t),source=f.message();
+  for(const patch of [{sourceMessageId:'other'},{historyVerified:false},{hintMessageId:source.messageId},{pendingSince:source.sentAt+1000}]){
+    assert.throws(()=>f.engine.recoverUnrepliedMessage({...source,platformHintPending:{hintMessageId:'wait-notice',sourceMessageId:source.messageId,pendingSince:source.sentAt,historyVerified:true,...patch}}),/证据/);
+  }
+});
+
 test('only the exact robot cancellation can be recovered and malformed pending evidence is rejected',t=>{
   const f=fixture(t),source=f.message(),job=f.engine.ingestMessage(source);
   f.engine.ingestMessage({...source,messageId:'robot-message',direction:'outgoing',text:'官方自动回复',sentAt:source.sentAt+1000});

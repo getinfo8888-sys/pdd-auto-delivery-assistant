@@ -318,7 +318,7 @@ function validateState(value) {
     if (job.sourceSentAt !== undefined && job.sourceSentAt !== null && (!Number.isFinite(job.sourceSentAt) || job.sourceSentAt <= 0)) throw new TypeError('答复来源时间已损坏');
     if (job.needsReplyVerification !== undefined && typeof job.needsReplyVerification !== 'boolean') throw new TypeError('答复核验标记已损坏');
     if (job.reviewedAt !== undefined && (!Number.isFinite(job.reviewedAt) || job.reviewedAt < 0)) throw new TypeError('答复复核时间已损坏');
-    for (const field of ['recoveryJobId', 'reviewedCancellationJobId', 'retryRejectedJobId', 'retryJobId', 'officialAutoReplyRecoveryJobId']) if (job[field] !== undefined && (typeof job[field] !== 'string' || !job[field] || job[field].length > 128)) throw new TypeError('答复复核任务关联已损坏');
+    for (const field of ['recoveryJobId', 'reviewedCancellationJobId', 'retryRejectedJobId', 'retryJobId', 'officialAutoReplyRecoveryJobId', 'platformHintRecoveryJobId']) if (job[field] !== undefined && (typeof job[field] !== 'string' || !job[field] || job[field].length > 128)) throw new TypeError('答复复核任务关联已损坏');
     if (job.replyCooldownUntil !== undefined && (job.type !== 'reply' || !Number.isFinite(job.replyCooldownUntil) || job.replyCooldownUntil < 0)) throw new TypeError('答复冷却时间已损坏');
     if (job.replyConfirmedAt !== undefined && (job.type !== 'reply' || job.parentJobId || !Number.isFinite(job.replyConfirmedAt) || job.replyConfirmedAt < 0)) throw new TypeError('答复确认时间已损坏');
     if (job.replyRetryCount !== undefined && (job.type !== 'reply' || !Number.isSafeInteger(job.replyRetryCount) || job.replyRetryCount < 0)) throw new TypeError('答复重试次数已损坏');
@@ -837,6 +837,11 @@ class Engine {
     if (input.direction !== 'incoming' || input.pending !== true || !Number.isFinite(input.sentAt) || input.sentAt < this._time() - 7 * 86400000 || input.sentAt > this._time() + 60000) throw new Error('补答需要近七天官方待回复的买家消息');
     const automaticEvidence = input.officialAutoReplyPending;
     if (automaticEvidence !== undefined && (!plain(automaticEvidence) || automaticEvidence.historyVerified !== true || automaticEvidence.sourceMessageId !== event.messageId || typeof automaticEvidence.automaticMessageId !== 'string' || !automaticEvidence.automaticMessageId || automaticEvidence.automaticMessageId.length > 512 || automaticEvidence.automaticMessageId === event.messageId || !Number.isFinite(automaticEvidence.pendingSince) || automaticEvidence.pendingSince <= 0 || automaticEvidence.pendingSince > event.sentAt)) throw Error('官方自动回复后的待回复证据无效');
+    const hintEvidence = input.platformHintPending;
+    if (hintEvidence !== undefined && (!plain(hintEvidence) || hintEvidence.historyVerified !== true || hintEvidence.sourceMessageId !== event.messageId || typeof hintEvidence.hintMessageId !== 'string' || !hintEvidence.hintMessageId || hintEvidence.hintMessageId.length > 512 || hintEvidence.hintMessageId === event.messageId || !Number.isFinite(hintEvidence.pendingSince) || hintEvidence.pendingSince <= 0 || hintEvidence.pendingSince > event.sentAt)) throw Error('官方系统提示后的待回复证据无效');
+    if (automaticEvidence && hintEvidence) throw Error('待回复来源证据不能混用');
+    const pendingEvidence = automaticEvidence || hintEvidence;
+    const markerMessageId = automaticEvidence?.automaticMessageId || hintEvidence?.hintMessageId;
     const config = this._state.config;
     if (!config.running || !config.autoReplyEnabled || !config.catchUpUnrepliedEnabled) return { status: 'disabled' };
     const key = JSON.stringify([event.shopId, event.messageId]);
@@ -856,11 +861,11 @@ class Engine {
     if (previous.some(job => ['sending','uncertain','sent'].includes(job.status))) return { status: 'already_handled' };
     if (previous.some(job => job.status === 'queued')) return { status: 'queued' };
     // A preflight skip never submits a message. Only fresh official history
-    // proving that the source remains unanswered behind a robot bubble can
+    // proving that the source remains unanswered behind a robot or notice can
     // recover these cancellations. Genuine manual replies remain protected.
-    const automaticCancellations = automaticEvidence ? previous.filter(job => !job.parentJobId && job.status === 'cancelled' && !job.outbound && !job.sentMessageId && !job.replyAttemptHistory?.length &&
-      (job.reason === 'conversation_changed' || job.reason === 'manual_intervention' && job.manualInterventionEvidence?.messageId === automaticEvidence.automaticMessageId)) : [];
-    const automaticCancelled = automaticCancellations.at(-1);
+    const pendingCancellations = pendingEvidence ? previous.filter(job => !job.parentJobId && job.status === 'cancelled' && !job.outbound && !job.sentMessageId && !job.replyAttemptHistory?.length &&
+      (job.reason === 'conversation_changed' || job.reason === 'manual_intervention' && job.manualInterventionEvidence?.messageId === markerMessageId)) : [];
+    const pendingCancelled = pendingCancellations.at(-1);
     // An old permanent recovery claim must not strand a platform-confirmed
     // duplicate rejection. Select only the latest untouched explicit rejection.
     if (reviewedCancellationJobId === undefined && retryRejectedJobId === undefined) {
@@ -870,7 +875,7 @@ class Engine {
     const claimParts = [event.shopId, event.buyerId, event.messageId, fingerprint];
     if (reviewedCancellationJobId !== undefined) claimParts.push('reviewed_cancellation', reviewedCancellationJobId);
     if (retryRejectedJobId !== undefined) claimParts.push('retry_rejected', retryRejectedJobId);
-    if (automaticCancelled) claimParts.push('official_automatic_reply', automaticCancelled.id);
+    if (pendingCancelled) claimParts.push(hintEvidence ? 'platform_hint' : 'official_automatic_reply', pendingCancelled.id);
     const claimKey = JSON.stringify(claimParts);
     if (this._state.ledger.replyRecovery[claimKey]) return { status: 'already_attempted' };
     const reviewed = reviewedCancellationJobId === undefined ? null : previous.find(job => job.id === reviewedCancellationJobId);
@@ -880,7 +885,7 @@ class Engine {
     // Observing a message does not prove it was answered: older versions could
     // record it and then skip it due to cooldown. Missing jobs may recover only
     // through the official pending scan plus the mandatory latest-message check.
-    if (previous.some(job => job !== reviewed && job.status === 'cancelled' && job.reason !== 'rules_changed' && !automaticCancellations.includes(job) || job.status === 'blocked' && !['paused','reply_disabled','no_content','operation_rejected','adapter_unavailable'].includes(job.reason))) return { status: 'needs_review' };
+    if (previous.some(job => job !== reviewed && job.status === 'cancelled' && job.reason !== 'rules_changed' && !pendingCancellations.includes(job) || job.status === 'blocked' && !['paused','reply_disabled','no_content','operation_rejected','adapter_unavailable'].includes(job.reason))) return { status: 'needs_review' };
     let job;
     this._mutate(() => {
       const history = this._state.ledger.replyHistory[buyerKey] || [];
@@ -890,10 +895,11 @@ class Engine {
       job = this._job('reply', event, { ...plan, simulation: false });
       Object.assign(job, { strategy: plan.strategy, catchUp: true, needsReplyVerification: true, sourceSentAt: input.sentAt,
         notBefore: Math.max(this._time() + plan.delaySeconds * 1000, cooldownUntil) });
-      if (automaticCancelled) {
-        automaticCancelled.reviewedAt=this._time();automaticCancelled.recoveryJobId=job.id;
-        job.officialAutoReplyRecoveryJobId=automaticCancelled.id;
-        this._log('info','官方机器人回复后仍待人工答复，已复核误取消记录并重新安排补答',{code:'official_auto_reply_recovered',jobId:job.id,previousJobId:automaticCancelled.id,automaticMessageId:automaticEvidence.automaticMessageId});
+      if (pendingCancelled) {
+        pendingCancelled.reviewedAt=this._time();pendingCancelled.recoveryJobId=job.id;
+        if (hintEvidence) job.platformHintRecoveryJobId=pendingCancelled.id;
+        else job.officialAutoReplyRecoveryJobId=pendingCancelled.id;
+        this._log('info','官方仍标记待回复，已核验提示后的原始咨询并恢复未发送任务',{code:hintEvidence?'platform_hint_reply_recovered':'official_auto_reply_recovered',jobId:job.id,previousJobId:pendingCancelled.id,markerMessageId});
       }
       if (reviewed) {
         reviewed.reviewedAt = this._time(); reviewed.recoveryJobId = job.id;
@@ -917,6 +923,7 @@ class Engine {
       this._state.ledger.replyRecovery[claimKey] = { at: this._time(), jobId: job.id };
       this._state.ledger.lastAsk[buyerKey] = this._time();
       this._state.ledger.replyHistory[buyerKey] = [...history, { at: this._time(), content: plan.content, replyRuleId: plan.replyRuleId || '' }].slice(-100);
+      if (hintEvidence) this._log('info','已从平台系统提示前找回待回复咨询，按当前规则安排补答',{code:'platform_hint_pending_queued',jobId:job.id,hintMessageId:hintEvidence.hintMessageId,sourceMessageId:event.messageId,pendingSince:hintEvidence.pendingSince});
       this._log('info', '官方确认会话仍待回复，已按当前规则安排补答', { code: 'catch_up_queued', jobId: job.id });
     });
     return { status: 'created', job: clone(job) };
