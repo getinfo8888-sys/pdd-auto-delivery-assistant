@@ -17,6 +17,7 @@ const settingBooleanKeys=['autoReplyEnabled','autoDeliveryEnabled','autoConfirmS
 const settingNumberKeys=['cooldownSeconds','maxPerMinute','firstReplyIntervalMinutes','firstReplyDelaySeconds','replyDelaySeconds'];
 const settingKeys=new Set([...settingBooleanKeys,...settingNumberKeys,'suffix','replySuffixMode']);
 let settingsDraft={},settingsSaveTail=Promise.resolve(),settingsPending=0,settingsSaveError=null,settingsTimer,navigationRevision=0;
+let phoneAlertDraft=null;
 let lastAutoPromptKey='';
 const icons = { dashboard:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z', shop:'M3 10v11h18V10 M2 4h20l-2 6H4z M9 21v-7h6v7', box:'M3 7l9-5 9 5-9 5z M3 7v11l9 5 9-5V7 M12 12v11', chat:'M21 11a8 8 0 01-8 8H6l-4 3V8a7 7 0 017-7h5a7 7 0 017 7z M7 8h9 M7 12h6', queue:'M5 4h14v17H5z M9 2h6v4H9z M8 11h8 M8 15h5', log:'M5 3h12l3 3v15H5z M9 8h6 M9 12h7 M9 16h5', settings:'M12 8a4 4 0 100 8 4 4 0 000-8 M9 2h6l1 4 4 1 2 5-3 3 1 4-5 3-3-3-4 1-3-5 3-3-1-4z', plus:'M12 5v14 M5 12h14', search:'M10 3a7 7 0 110 14 7 7 0 010-14 M15 15l6 6', arrow:'M5 12h14 M14 7l5 5-5 5', link:'M9 15l6-6 M7 13l-2 2a4 4 0 006 6l4-4 M17 11l2-2a4 4 0 00-6-6L9 7', check:'M4 12l5 5L20 6', clock:'M12 2a10 10 0 100 20 10 10 0 000-20 M12 6v6l4 2', play:'M8 4l12 8-12 8z', pause:'M8 4v16 M16 4v16', export:'M12 3v12 M7 8l5-5 5 5 M4 14v7h16v-7', refresh:'M20 7a9 9 0 10.5 9 M20 2v6h-6' };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[name] || icons.box}"/></svg>`;
@@ -170,7 +171,8 @@ function switchRow(title, description, key, checked) { return `<div class="toggl
 function settings() {
   const c={...state.config,...settingsDraft};
   const number=(key,label,min,max)=>`<label class="field"><span>${label}</span><input id="${key}" type="number" min="${min}" max="${max}" value="${c[key]}"></label>`;
-  return `${heading('助手设置','开关切换后自动保存；修改设置会暂停监听。保存完成后可直接开始。',button('立即保存','save-settings',true))}<div id="settings-save-state" class="small-note" role="status">更改已自动保存</div>
+  return `${heading('助手设置','业务设置自动保存，修改时会暂停监听；异常提醒单独保存，不会暂停监听。',button('立即保存','save-settings',true))}<div id="settings-save-state" class="small-note" role="status">业务设置更改已自动保存</div>
+  ${phoneAlertPanel()}
   <section class="panel"><div class="panel-head"><h2>手机复制链接与图片</h2></div><div class="panel-body">${switchRow('正文后单独发送纯链接','保留原来的介绍，再将其中每条网址单独发一条，便于手机长按复制。纯链接不添加说明、时间或不可见字符。','separateLinksEnabled',c.separateLinksEnabled)}<p class="small-note">图片 / 二维码可在“发货内容”或“智能答复”的编辑窗口中添加。发送顺序：正文 → 纯链接 → 图片；全部成功后再确认发货。链接能否直接点击由拼多多客户端决定。</p></div></section>
   <div class="two-columns"><div><section class="panel"><div class="panel-head"><h2>自动处理</h2></div><div class="panel-body">
   ${switchRow('智能答复','按欢迎语、匹配规则与默认答复处理新咨询。','autoReplyEnabled',c.autoReplyEnabled)}
@@ -185,6 +187,34 @@ function settings() {
   <section class="panel"><div class="panel-head"><h2>规则迁移</h2></div><div class="panel-body"><p>淘宝助手单独运行，通过下面两类文件迁移规则。导入一类内容，不会覆盖另一类的内容。</p>${[['replies','智能答复规则','关键词、匹配方式、答复正文、欢迎语与默认答复'],['delivery','发货规则','商品 / SKU 关键词、排除词、网盘正文与发货尾缀']].map(([scope,label,description])=>`<h3>${label}</h3><p class="small-note">${description}</p><div class="heading-actions">${button('导出'+label,'shared-export',false,`data-scope="${scope}"`)}${button('导入并预览','shared-import',false,`data-scope="${scope}"`)}</div>`).join('')}<p class="small-note">兼容旧规则备份，仅提取所选类别。图片和平台专属规则需单独处理。先暂停监听再确认导入，原规则自动备份。</p></div></section>
   <section class="panel"><div class="panel-head"><h2>官方连接</h2></div><div class="panel-body"><p>${esc(state.connection.diagnostics.chat.message)}</p>${button('检测官方连接','check-platform')}${button('打开店铺页面','open-shop')}<div class="small-note">实际发送、确认发货和退款结果，请在运行记录中核对平台回执。</div></div></section><div class="small-note">拼多多自动发货助手 v${esc(state.version)}</div></div></div>`;
 }
+function phoneAlertPanel(){
+  const alerts=state.phoneAlerts;if(!alerts)return '';
+  const c=phoneAlertDraft?.config||alerts.config,route=c.provider+':'+c.channel;
+  const selected=alerts.credentials[c.provider],sms=c.channel==='sms',incident=alerts.monitor.incident;
+  const status=[alerts.monitor.lastNotification,alerts.test].filter(Boolean).sort((a,b)=>(b.acceptedAt||b.lastAttemptAt||b.at)-(a.acceptedAt||a.lastAttemptAt||a.at))[0];
+  const statuses={pending:'等待提交',submitting:'正在提交',accepted:'推送服务已受理',retrying:'等待重试',failed:'未取得服务受理确认',cancelled:'已取消'};
+  return `<section class="panel" data-phone-alerts><div class="panel-head"><h2>异常提醒 · 桌面与手机</h2></div><div class="panel-body">
+  ${switchRow('电脑右下角异常弹窗','默认开启，无需绑定手机。助手缩到托盘时也显示，不抢输入焦点；收起提示后继续自动恢复。','alert-desktop',c.desktopEnabled)}
+  <div class="heading-actions">${button('预览桌面弹窗','desktop-alert-test')}</div>
+  ${switchRow('启用手机提醒','持续异常且自动恢复失败后提醒；同一故障被服务受理后不重复提交。','alert-enabled',c.enabled)}
+  <div class="form-grid"><label class="field"><span>接收方式</span><select id="alert-route">${[['serverchan:wechat','普通微信 · Server酱Turbo'],['pushplus:wechat','普通微信 · PushPlus'],['pushplus:sms','短信 · PushPlus（约0.1元/条）']].map(([value,label])=>`<option value="${value}" ${route===value?'selected':''}>${label}</option>`).join('')}</select></label>
+  <label class="field"><span>${c.provider==='serverchan'?'SendKey（SCT开头）':'PushPlus Token'}</span><input id="alert-token" type="password" autocomplete="new-password" spellcheck="false" maxlength="256" value="${esc(phoneAlertDraft?.token||'')}" placeholder="${selected?'已保存；留空保留现有密钥':'在服务官网获取后粘贴到这里'}"></label>
+  <label class="field"><span>持续异常达到（秒）</span><input id="alert-seconds" type="number" min="30" max="3600" value="${c.failureSeconds}"></label><label class="field"><span>检测 / 恢复失败至少（次）</span><input id="alert-failures" type="number" min="2" max="20" value="${c.minFailures}"></label></div>
+  ${switchRow('恢复后再通知一次','恢复正常并稳定一分钟后提醒。短信会另外消耗一条。','alert-recovery',c.notifyRecovery)}
+  <p class="small-note">${c.provider==='serverchan'?'先在Server酱绑定微信接收通道，再填写SendKey。免费额度以服务官网为准。':'先在PushPlus绑定微信或手机号，并完成官网要求的实名配置。'}${sms?'短信按条计费、需有积分，手机仅收到服务的固定提示，详细异常请在服务中查看。':''}</p>
+  <div class="heading-actions">${button('打开服务官网','phone-alert-setup')}${button('保存提醒设置','phone-alert-save',true)}${button(sms?'发送短信测试（约0.1元）':'发送测试提醒','phone-alert-test')}${button('清除本机密钥','phone-alert-clear',false,selected?'':'disabled')}</div>
+  <p class="small-note" data-phone-alert-status>桌面弹窗${alerts.config.desktopEnabled?'已开启':'已关闭'} · 手机提醒${alerts.config.enabled?'已开启':'未开启'}${phoneAlertDraft?'（有修改待保存）':''} · ${selected?'密钥已加密保存':'尚未配置手机密钥'}${status?` · ${esc(statuses[status.status]||status.status)}（${fmt(status.acceptedAt||status.at||status.lastAttemptAt)}）`:''}${status?.error?'<br>'+esc(status.error):''}</p>
+  ${incident?`<p class="small-note">异常开始：${fmt(incident.startedAt)}；已记录 ${incident.failures} 次检测失败。</p>`:''}
+  ${alerts.settingsError||alerts.monitor.persistenceError||alerts.runtimeError?`<div class="inline-error">${esc(alerts.settingsError||alerts.monitor.persistenceError||alerts.runtimeError)}</div>`:''}
+  <p class="small-note">默认持续异常60秒、至少3次检测或恢复失败后提醒，同一故障不反复弹出。正常并稳定一分钟后自动收起；手动暂停不报警。此处单独保存，不会暂停监听。密钥不随规则备份或迁移导出。测试显示“服务已受理”后，请亲自确认手机能收到。电脑断网时仍可显示桌面提示，但无法即时向手机推送；休眠、关机或程序退出需外部心跳监测补足。断网恢复后会补充尚未发出的故障摘要。</p>
+  </div></section>`;
+}
+function rememberPhoneAlertDraft(){
+  if(!document.getElementById('alert-route'))return;
+  const [provider,channel]=document.getElementById('alert-route').value.split(':');
+  phoneAlertDraft={config:{desktopEnabled:document.getElementById('alert-desktop').checked,enabled:document.getElementById('alert-enabled').checked,provider,channel,failureSeconds:Number(document.getElementById('alert-seconds').value),minFailures:Number(document.getElementById('alert-failures').value),notifyRecovery:document.getElementById('alert-recovery').checked},token:document.getElementById('alert-token').value};
+}
+async function savePhoneAlertSettings(){rememberPhoneAlertDraft();state=await call('phone-alerts:save',phoneAlertDraft);phoneAlertDraft=null;render();}
 function refunds() {
   return `${heading('自动退款','对官方标记为需商家同意的退款申请，检测后立即提交同意。',button('预览退款流程','simulate-refund'))}
   <div class="banner ${state.config.autoRefundEnabled?'':'amber'}">${icon('refresh')}<span>自动退款${state.config.autoRefundEnabled?'已开启':'未开启'}。申请会先停止该订单尚未执行的发货，再查询最新申请版本并提交同意；完成以平台回执为准。</span></div>
@@ -300,6 +330,10 @@ function jobDetail(id) {
   }
 }
 async function action(name, target) {
+  if(name==='phone-alert-save'){await savePhoneAlertSettings();toast('提醒设置已保存，监听继续运行');return;}
+  if(name==='phone-alert-test'){await savePhoneAlertSettings();state=await call('phone-alerts:test');render();toast(state.phoneAlerts.test?.status==='accepted'?'推送服务已受理，请查看手机是否收到':state.phoneAlerts.test?.error||'未取得服务受理确认',state.phoneAlerts.test?.status!=='accepted');return;}
+  if(name==='phone-alert-setup'){rememberPhoneAlertDraft();return call('phone-alerts:setup',phoneAlertDraft.config.provider);}
+  if(name==='phone-alert-clear'){rememberPhoneAlertDraft();phoneAlertDraft.config.enabled=false;state=await call('phone-alerts:save',{config:phoneAlertDraft.config,clearToken:true});phoneAlertDraft=null;render();toast('密钥已清除，手机提醒已关闭');return;}
   if(name==='shared-export') {const result=await call('content:export',{scope:target.dataset.scope});if(!result.cancelled)toast(result.reviewCount?`规则已导出；${result.reviewCount} 项图片或平台规则需单独配置`:'规则已导出');return;}
   if(name==='shared-import') {const result=await call('content:preview',{scope:target.dataset.scope});if(!result.cancelled)showSharedPreview(result);return;}
   if(['shared-merge','shared-replace','shared-refresh'].includes(name)&&sharedPreview) {
@@ -388,7 +422,8 @@ async function action(name, target) {
     const newJobs=state.jobs.filter(j=>!before.has(j.id));
     document.querySelector('#simulation-result').innerHTML=newJobs.map(job=>`<div class="preview-result"><div class="preview-line">${label(job)}<span class="subtle">${esc(job.matchName||reason(job.reason))}</span></div>${job.reason?`<div class="small-note">${esc(reason(job.reason))}</div>`:''}<div class="content-preview">${esc(job.content||'未生成可发送内容')}</div>${job.type==='delivery' && state.config.autoConfirmShipmentEnabled?'<div class="small-note">真实运行：内容发送成功后，再向平台确认虚拟发货。</div>':''}${job.type==='refund'?'<div class="small-note">真实运行：停止待发货任务 → 查询最新申请 → 同意退款 → 核验平台状态。</div>':''}</div>`).join(''); return;
   }
-  if(name==='save-settings') {await flushSettings();render();toast('设置已自动保存');return;}
+  if(name==='desktop-alert-test'){await call('desktop-alert:test');return;}
+  if(name==='save-settings') {await flushSettings();if(phoneAlertDraft)await savePhoneAlertSettings();render();toast('设置已保存');return;}
   if(name==='backup'){const r=await call('data:export');if(!r.cancelled)toast('规则备份已导出');return;}
   if(name==='import'){const r=await call('data:import');if(!r.cancelled){state=r;render();toast('规则已导入，自动处理保持关闭');}return;}
   if(name==='data-folder')return call('app:data-folder');
@@ -421,6 +456,7 @@ document.addEventListener('click',async event=>{
   try {await flushSettings();await action(target.dataset.action,target);}catch(error){if(error.message)toast(error.message,true);}finally{busy=false;if(target.isConnected)target.disabled=false;}
 });
 document.addEventListener('input',event=>{
+  if(page==='settings'&&event.target.closest('[data-phone-alerts]')){rememberPhoneAlertDraft();return;}
   if(event.target.id==='search'){filter=event.target.value;const position=event.target.selectionStart;render();const input=document.querySelector('#search');input.focus();input.setSelectionRange(position,position);return;}
   if(page==='settings'&&settingKeys.has(event.target.id)){
     rememberSetting(event.target);clearTimeout(settingsTimer);
@@ -428,6 +464,7 @@ document.addEventListener('input',event=>{
   }
 });
 document.addEventListener('change',event=>{
+  if(page==='settings'&&event.target.closest('[data-phone-alerts]')){if(event.target.id==='alert-route')document.getElementById('alert-token').value='';rememberPhoneAlertDraft();if(event.target.id==='alert-route')render();return;}
   if(page==='settings'&&settingKeys.has(event.target.id)){rememberSetting(event.target);flushSettings().catch(error=>toast(error.message,true));}
 });
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&modal)closeModal();});

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>助手异常提醒</title><link rel="stylesheet" href="desktop-alert.css">
+</head>
+<body>
+  <header><img src="icon.svg" width="30" height="30" alt=""><span>拼多多自动发货助手</span><button id="dismiss" title="稍后处理" aria-label="收起提醒">×</button></header>
+  <main role="alert"><div class="tag">需要你看一下</div><h1>助手连接异常</h1><p id="reason">自动恢复尚未成功，请检查助手。</p><p id="detail" class="detail"></p><p class="hint">后台仍在尝试恢复；正常并稳定一分钟后，此提示会自动收起。</p></main>
+  <footer><button id="later">稍后处理</button><button id="open" class="primary">打开助手查看</button></footer>
+  <script src="desktop-alert.js"></script>
+</body>
+</html>

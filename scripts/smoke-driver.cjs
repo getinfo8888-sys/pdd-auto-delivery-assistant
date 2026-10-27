@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const wait = ms => new Promise(resolve=>setTimeout(resolve,ms));
-async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendingReplies, configureTestPlatform }) {
+async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendingReplies, configureTestPlatform, phoneAlerts, desktopAlert }) {
   const platform=require('./fixture-platform.cjs').createPlatform();configureTestPlatform(platform);
   engine.updateConfig({...engine.snapshot().config,suffix:'打开链接领取资源，也可以复制本条消息到对应网盘。'});
   const out=path.resolve(__dirname,'..','work'); fs.mkdirSync(out,{recursive:true});
@@ -199,6 +199,43 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   assert.ok(engine.snapshot().logs.some(row=>row.jobId===coveredReply.id&&row.code==='platform_hint_pending_queued'));
   await maintainPendingReplies(true);
   assert.equal(platform.data.actions.filter(row=>row.jobId===coveredReply.id).length,1);
+  const phoneNotices=[];platform.sendPhoneAlert=async(message,event)=>{phoneNotices.push({message,event});return {accepted:true,receiptId:'fixture-phone-receipt'};};
+  // Simulate an offline incident with a fake clock, never touching the actual network.
+  const realNow=phoneAlerts.monitor.now;let alertClock=Date.now();phoneAlerts.monitor.now=()=>alertClock;
+  const offline=id=>({wanted:true,online:false,healthy:false,scope:'chat',reason:'offline',failures:[{source:'isolated',id:String(id)}]});
+  phoneAlerts.observe({wanted:true,online:true,healthy:true,failures:[]});
+  phoneAlerts.observe(offline(1));alertClock+=120000;phoneAlerts.observe(offline(2));phoneAlerts.observe(offline(3));
+  await until(()=>desktopAlert.window&&!desktopAlert.window.webContents.isLoading(),'local alert loads without phone credentials or network');
+  const popup=desktopAlert.window;
+  await until(()=>popup.webContents.executeJavaScript("document.getElementById('reason').textContent.includes('网络')"),'local alert displays reason');
+  assert.equal(phoneNotices.length,0);assert.equal(phoneAlerts.snapshot().config.enabled,false);
+  const area=require('electron').screen.getDisplayMatching(window.getBounds()).workArea,bounds=popup.getBounds();
+  // Windows may include a few DIP of invisible non-client border in getBounds.
+  assert.ok(Math.abs(bounds.x+bounds.width-(area.x+area.width-12))<=6);assert.ok(Math.abs(bounds.y+bounds.height-(area.y+area.height-12))<=6);
+  fs.writeFileSync(path.join(out,'desktop-alert.png'),(await popup.webContents.capturePage()).toPNG());
+  await popup.webContents.executeJavaScript("document.getElementById('later').click()");await until(()=>popup.isDestroyed(),'local dismiss action');
+  phoneAlerts.observe(offline(4));assert.equal(desktopAlert.window,null);assert.equal(engine.snapshot().config.running,true);
+  phoneAlerts.observe({wanted:true,online:true,healthy:true,failures:[]});alertClock+=60000;phoneAlerts.observe({wanted:true,online:true,healthy:true,failures:[]});phoneAlerts.monitor.now=realNow;
+  assert.equal(desktopAlert.notice,null);
+  await click('[data-nav="settings"]');
+  assert.equal(await evalUi(`!!document.querySelector('[data-phone-alerts]')`),true);
+  assert.equal(await evalUi("document.querySelector('#alert-desktop').checked"),true);
+  const phoneKey='SCT'+'fixture'.repeat(8);
+  await value('#alert-token',phoneKey);await click('#alert-enabled');
+  await click('[data-action="phone-alert-save"]');
+  assert.equal(engine.snapshot().config.running,true,'saving phone alerts must not pause real business');
+  await until(()=>evalUi(`state.phoneAlerts.monitor.armed`),'phone monitor observes active listening');
+  assert.equal(await evalUi(`state.phoneAlerts.credentials.serverchan && document.querySelector('#alert-token').value===''`),true);
+  assert.equal(await evalUi(`JSON.stringify(state).includes(${JSON.stringify(phoneKey)})`),false);
+  await click('[data-action="phone-alert-test"]');assert.equal(phoneNotices.length,1);
+  assert.equal(await evalUi(`state.phoneAlerts.test.status`),'accepted');assert.equal(engine.snapshot().config.running,true);
+  await click('[data-nav="products"]');await click('[data-nav="settings"]');
+  assert.equal(await evalUi(`document.querySelector('#alert-enabled').checked`),true);
+  fs.writeFileSync(path.join(out,'phone-alert-settings.png'),(await window.webContents.capturePage()).toPNG());
+  await click('[data-action="desktop-alert-test"]');
+  await until(()=>desktopAlert.window&&!desktopAlert.window.webContents.isLoading(),'desktop preview loads');
+  const previewPopup=desktopAlert.window;assert.equal(desktopAlert.action({sender:window.webContents,senderFrame:window.webContents.mainFrame},'open'),false);
+  await previewPopup.webContents.executeJavaScript("document.getElementById('open').click()");await until(()=>previewPopup.isDestroyed(),'open assistant from alert');
   const nativeTrayWindowVisibilityVerified=!window.webContents.isOffscreen();
   trayMenu.items.find(item=>item.label==='打开工作台').click();await wait(200);if(nativeTrayWindowVisibilityVerified)assert.equal(window.isVisible(),true);
   window.close();await wait(100);assert.equal(window.isVisible(),false);assert.equal(window.isDestroyed(),false);assert.equal(engine.snapshot().config.running,true);
@@ -208,8 +245,11 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   results.assertions.push('body-space retry preference auto-saves across navigation');
   results.assertions.push('unmatched delivery default is configured through UI and IPC','unmatched title and SKU preview the default without sending','confirmed default delivery precedes automatic shipment');
   results.assertions.push('window Close hides to the tray without pausing listening','hidden workbench continues discovering and delivering orders','delivery rejection retries automatically with a visible deadline','tray Open restores the existing window');
+  results.assertions.push('offline desktop alert works with no phone key and uses screen work area','dismissing an alert does not pause recovery or reopen the same incident','desktop popup opens the existing assistant and rejects another sender');
   results.backgroundRejectedAttempts=backgroundRejectedAttempts;
   results.assertions.push('a platform notice cannot hide an offline pending inquiry from maintenance','notice-covered inquiry uses configured fallback and requires a receipt','a second scan does not duplicate a notice-covered reply');
+  results.assertions.push('phone reminder settings persist without pausing business','phone credentials are never echoed in snapshots or input fields','manual phone test uses only the isolated notification service','phone monitor observes the real application connection state');
+  results.fixturePhoneNotices=phoneNotices.length;
   results.assertions.push('local image selection saves metadata without sending to a buyer','image editor restores saved attachments','standalone URL setting auto-saves across navigation','text then exact URL then image precede shipment','image rejection persists and retries without resending previous parts','part receipts are visible in processing details');
   results.fixtureAssetUploads=fixtureAssetUploads;results.imageRejections=imageRejections;
   results.nativeTrayWindowVisibilityVerified=nativeTrayWindowVisibilityVerified;

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, Tray, Menu, nativeImage, powerSaveBlocker, net } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, Tray, Menu, nativeImage, powerSaveBlocker, net, safeStorage, screen } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
@@ -9,6 +9,9 @@ const { exportSharedContent, SharedImportDraft } = require('./core/shared-conten
 const { StartupListener } = require('./core/startup-listener.cjs');
 const { NetworkRefresh } = require('./core/network-refresh.cjs');
 const { CapabilityRecovery, pageRefreshDecision } = require('./core/capability-recovery.cjs');
+const { AlertService } = require('./core/alert-service.cjs');
+const { connectionSample } = require('./core/alert-health.cjs');
+const { DesktopAlert } = require('./desktop-alert.cjs');
 const { allowedUrl, defaultProfile, validateProfile, makeScript } = require('./platform/page-adapter.cjs');
 const { makeOfficialScript, summarizeOfficial } = require('./platform/pdd-official.cjs');
 const { makeOrdersScript } = require('./platform/pdd-orders.cjs');
@@ -55,6 +58,7 @@ let runNonce = 0;
 let startupListener, startPromise, catchUpTimer, catchUpToken = 0, catchUpCollecting = false;
 let listenIntent = false, recoveryShopId = '', connectFailures = 0;
 let networkRefresh, networkTimer, rendererOnline, networkRefreshBusy = false;
+let phoneAlerts,phoneAlertTimer,desktopAlert;
 let lastPageStatusCheck = 0;
 const pageStates = {}, lastPageLoadedAt = new Map();
 const pagesToRecover = new Set(), lastPageRecovery = new Map();
@@ -100,7 +104,7 @@ function recordPopupCleanup(value) {
   }
 }
 function snapshot() {
-  return { ...engine.snapshot(), revision:stateRevision, readOnly:readOnlyDiagnostic, autoStart: startupListener?.state || {phase:'idle',pending:false}, catchUp: catchUpState, connection: { profile, diagnostics, bridge: bridgeDiagnostics, network: networkRefresh?.state, pages: pageStates, shopId: connectedShopId, officialInspection, officialOrdersInspection, urls: Object.fromEntries([...views].map(([kind, view]) => [kind, view.webContents.getURL()])), coverage: '客服监听新消息，启动时分页核验近七天的待回复会话；订单与售后由官方接口分页扫描，执行结果以平台回执为准。' }, version: app.getVersion(), startup: app.getLoginItemSettings().openAtLogin, dataDir };
+  return { ...engine.snapshot(), revision:stateRevision, readOnly:readOnlyDiagnostic, phoneAlerts:phoneAlerts?.snapshot()||null, autoStart: startupListener?.state || {phase:'idle',pending:false}, catchUp: catchUpState, connection: { profile, diagnostics, bridge: bridgeDiagnostics, network: networkRefresh?.state, pages: pageStates, shopId: connectedShopId, officialInspection, officialOrdersInspection, urls: Object.fromEntries([...views].map(([kind, view]) => [kind, view.webContents.getURL()])), coverage: '客服监听新消息，启动时分页核验近七天的待回复会话；订单与售后由官方接口分页扫描，执行结果以平台回执为准。' }, version: app.getVersion(), startup: app.getLoginItemSettings().openAtLogin, dataDir };
 }
 function changed() { stateRevision++; if (!closing && window && !window.isDestroyed() && engine) window.webContents.send('state:changed'); }
 function showWorkbench() {
@@ -779,6 +783,11 @@ function registerIpc() {
   });
   const handle = (name, action) => ipcMain.handle(name, async (event, ...args) => { trusted(event); return await action(...args); });
   handle('snapshot', () => snapshot());
+  handle('phone-alerts:save', input => {if(!phoneAlerts)throw Error('当前诊断模式不保存手机提醒');phoneAlerts.update(input);changed();return snapshot();});
+  handle('phone-alerts:test', async () => {if(!phoneAlerts)throw Error('当前诊断模式禁止提交手机提醒');await phoneAlerts.test();return snapshot();});
+  handle('phone-alerts:setup', provider => {if(!['serverchan','pushplus'].includes(provider))throw Error('提醒服务无效');return shell.openExternal(provider==='serverchan'?'https://sct.ftqq.com/':'https://www.pushplus.plus/uc.html');});
+  handle('desktop-alert:test',()=>{if(phoneAlerts?.snapshot().monitor.incident?.desktopShownAt)throw Error('当前已有异常提醒，请先检查连接状态');desktopAlert?.show({id:'preview-'+Date.now(),reason:'这是一条桌面弹窗预览，当前连接状态没有改变。',startedAt:Date.now(),failures:0});return true;});
+  ipcMain.on('desktop-alert:action',(event,action)=>desktopAlert?.action(event,action));
   handle('media:preview', value => {
     if (!value || !/^[a-f0-9]{64}$/.test(value.id || '') || !['image/png','image/jpeg'].includes(value.mime)) throw new Error('图片标识无效');
     const file=path.join(dataDir,'assets',value.id+(value.mime==='image/png'?'.png':'.jpg'));
@@ -933,6 +942,12 @@ else {
       const shadowFile=path.join(shadowDir,'state.json');if(fs.existsSync(stateFile))fs.copyFileSync(stateFile,shadowFile);stateFile=shadowFile;
     }
     engine = new Engine({ filePath: stateFile, sendMessage: transport, markShipped: transport, agreeRefund: transport });
+    if(!readOnlyDiagnostic&&!imageUploadAudit){
+      desktopAlert=new DesktopAlert({BrowserWindow,screen,openWorkbench:showWorkbench,mainWindow:()=>window,offscreen:smokeMode&&!layoutSmoke,onError:()=>phoneAlerts?.reportError()});
+      phoneAlerts=new AlertService({directory:dataDir,crypto:safeStorage,fetchImpl:(...args)=>net.fetch(...args),previouslyWorked:engine.snapshot().stats.sent>0,changed,desktop:notice=>desktopAlert.show(notice),
+        sendOverride:smokeMode?async(message,event)=>{if(typeof testPlatform?.sendPhoneAlert!=='function')throw Error('隔离样本未配置手机推送，不会请求外网');return testPlatform.sendPhoneAlert(message,event);}:undefined});
+      phoneAlertTimer=setInterval(()=>{if(closing)return;try{phoneAlerts.observe(connectionSample({config:engine.snapshot().config,listenIntent,startup:startupListener,bridgeAvailable,diagnostics,capabilities:{orders:capabilityRecovery.state('orders'),refunds:capabilityRecovery.state('refunds')},online:smokeMode?testPlatform?.online!==false:net.isOnline()&&rendererOnline!==false}));}catch{phoneAlerts.reportError();}},5000);
+    }
     startupListener = new StartupListener({start:startListening,update:()=>changed()});
     networkRefresh = new NetworkRefresh({ refresh: refreshPagesAfterNetwork, settleMs: smokeMode ? 100 : 5000, update: value => {
       if (!smokeMode && (!readOnlyDiagnostic || networkReadOnly)) recordNetworkRecovery({ event: 'network_state', phase: value.phase, cycle: value.cycle });
@@ -954,7 +969,7 @@ else {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(uiUrl)) event.preventDefault(); });
     registerIpc(); window.loadURL(uiUrl);
-    if (smoke) window.webContents.once('did-finish-load', () => require(sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
+    if (smoke) window.webContents.once('did-finish-load', () => require(sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, phoneAlerts, desktopAlert, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
     if (!smoke && !readOnlyDiagnostic && !liveWireAudit && !pendingReplyAudit && !imageUploadAudit && !process.argv.includes('--start-paused')) window.webContents.once('did-finish-load', () => startupListener.arm(engine.snapshot().config));
     if (imageUploadAudit) window.webContents.once('did-finish-load',()=>require('../scripts/image-upload-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('图片检查失败：'+error.message);app.exit(1);}));
     if (popupCleanupAudit) window.webContents.once('did-finish-load',()=>require('../scripts/popup-cleanup-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('弹窗检查失败：'+error.message);app.exit(1);}));
@@ -977,6 +992,6 @@ else {
     timer = setInterval(() => poll(), 3000);
     dispatchTimer = setInterval(() => pump(), 250);
     pendingReplyTimer = setInterval(() => {void maintainPendingReplies().catch(error=>note('待回复检查将继续重试：'+error.message));},60000);
-    app.on('before-quit', () => { closing = true; networkRefresh?.dispose(); clearInterval(networkTimer); clearInterval(timer); clearInterval(dispatchTimer); clearInterval(pendingReplyTimer); pause(); for (const view of views.values()) { if (!view.webContents.isDestroyed()) view.webContents.close(); } });
+    app.on('before-quit', () => { closing = true; phoneAlerts?.dispose();desktopAlert?.dispose();clearInterval(phoneAlertTimer);networkRefresh?.dispose(); clearInterval(networkTimer); clearInterval(timer); clearInterval(dispatchTimer); clearInterval(pendingReplyTimer); pause(); for (const view of views.values()) { if (!view.webContents.isDestroyed()) view.webContents.close(); } });
   }).catch(error => { dialog.showErrorBox('工作台启动失败', error.message); app.quit(); });
 }
