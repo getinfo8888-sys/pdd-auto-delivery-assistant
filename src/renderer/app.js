@@ -207,7 +207,7 @@ function replyRecovery() {
 function runtimeSettings() {
   const c={...state.config,...settingsDraft};
   return `<div class="settings-stack">${settingSaveBar()}<p class="settings-hint">设置更改自动保存，并暂停本次监听；核对后可重新开始监听。</p>
-  <section class="panel"><div class="panel-head"><h2>本机运行</h2></div><div class="panel-body">${switchRow('打开软件自动监听','使用已开启的答复、发货和退款功能；需要登录或验证时，完成后自动继续。','autoListenOnLaunch',c.autoListenOnLaunch)}${switchRow('开机打开工作台','登录 Windows 后打开软件；是否自动监听由上面的开关决定。','startup',settingsDraft.startup ?? state.startup)}<div class="form-footer">${button('收起到托盘','background')}</div><p class="small-note">关闭窗口默认收起到托盘。电脑关机、休眠或退出程序后无法继续处理。</p></div></section>
+  <section class="panel"><div class="panel-head"><h2>启动与托盘</h2></div><div class="panel-body">${switchRow('打开软件自动监听','使用已开启的答复、发货和退款功能；需要登录或验证时，完成后自动继续。','autoListenOnLaunch',c.autoListenOnLaunch)}${switchRow('开机打开工作台','登录 Windows 后打开软件；是否自动监听由上面的开关决定。','startup',settingsDraft.startup ?? state.startup)}<div class="form-footer">${button('收起到托盘','background')}</div><p class="small-note">关闭窗口默认收起到托盘。电脑关机、休眠或退出程序后无法继续处理。</p></div></section>
   <section class="panel"><div class="panel-head"><h2>全局发送上限</h2></div><div class="panel-body"><div class="form-grid">${numberSetting(c,'maxPerMinute','每分钟最多发送消息（条）',1,120)}</div><p class="small-note">智能答复和发货消息共用此上限。各功能的开关与业务策略，请到左侧对应页面设置。</p></div></section></div>`;
 }
 function backupSettings() {

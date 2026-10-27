@@ -1,0 +1,34 @@
+/* App-owned surfaces only. Merchant pages keep their official styles.
+   Role-based type scale: Ant Design typography / Material type roles.
+   Text contrast target: WCAG 1.4.3, >= 4.5:1 for enabled text. */
+:root {
+  --font-family-ui: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-caption: 12px;
+  --font-body: 14px;
+  --font-navigation: 16px;
+  --font-title: 20px;
+  --font-page: 24px;
+  --font-display: 32px;
+  --line-caption: 20px;
+  --line-body: 22px;
+  --line-navigation: 24px;
+  --line-title: 28px;
+  --line-page: 32px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-primary: #1f2937;
+  --text-secondary: #475569;
+  --text-muted: #5f6f82;
+  --text-disabled: #94a3b8;
+  --text-inverse: #ffffff;
+  --text-accent: #0f6b75;
+  --text-success: #216844;
+  --text-warning: #875411;
+  --text-danger: #a33832;
+  --text-link: #1d4ed8;
+  --surface-page: #f5f7f9;
+  --surface-default: #ffffff;
+  --surface-subtle: #f1f5f9;
+  --surface-selected: #e9f5f4;
+}

@@ -42,7 +42,8 @@ async function run({app,window,views,engine,configureTestPlatform}){
   await js(`api.call('browser:show',{kind:'orders',visible:true,bounds:{x:250,y:-50,width:800,height:500}})`);await until(()=>attached().length===0);checks.push('invalid native bounds detach the page instead of leaving a stale overlay');
   await js(`lastBrowserLayout='';updateBrowser()`);await assertFit('orders');
   await click('[data-nav="products"]');await until(()=>attached().length===0);checks.push('leaving the store page removes both native merchant views from the window');
-  const result={ok:true,assertions:checks,windowSizes:sizes,actualPlatformWrites:0,network:'data URL fixture only',merchantPagesConnected:false};
+  const typography=await require('./typography-smoke.cjs').run({window,engine});
+  const result={ok:true,assertions:checks,windowSizes:sizes,typography,actualPlatformWrites:0,network:'data URL fixture only',merchantPagesConnected:false};
   fs.writeFileSync(path.resolve(__dirname,'../work/layout-smoke-result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));app.quit();
 }
 module.exports={run,createView};
