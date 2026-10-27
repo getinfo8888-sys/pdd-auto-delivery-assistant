@@ -8,10 +8,15 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   const out=path.resolve(__dirname,'..','work'); fs.mkdirSync(out,{recursive:true});
   const evalUi = code => window.webContents.executeJavaScript(code);
   const click = async selector => {
+    if(/^#[a-zA-Z]/.test(selector))await openSetting(selector.slice(1));
+    if(selector==='[data-action="edit-delivery-fallback"]'){await click('[data-nav="products"]');await click('[data-section="delivery"]');}
     await until(()=>evalUi(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});return !!element && !element.disabled && (!element.dataset.action || !busy);})()`),'control ready: '+selector);
     await evalUi(`document.querySelector(${JSON.stringify(selector)}).click()`);await wait(250);
   };
-  const value = async(selector,text) => evalUi(`document.querySelector(${JSON.stringify(selector)}).value=${JSON.stringify(text)}`);
+  const value = async(selector,text) => {if(/^#[a-zA-Z]/.test(selector))await openSetting(selector.slice(1));return evalUi(`document.querySelector(${JSON.stringify(selector)}).value=${JSON.stringify(text)}`);};
+  const fieldRoutes={autoReplyEnabled:['replies','strategy'],replySuffixEnabled:['replies','strategy'],replySuffixMode:['replies','strategy'],cooldownSeconds:['replies','strategy'],replyDelaySeconds:['replies','strategy'],replyBodySpaceRetryEnabled:['replies','recovery'],autoDeliveryEnabled:['products','delivery'],autoConfirmShipmentEnabled:['products','delivery'],suffix:['products','delivery'],separateLinksEnabled:['products','delivery'],autoRefundEnabled:['refunds'],maxPerMinute:['settings','runtime']};
+  const openSetting=async key=>{const route=fieldRoutes[key];if(!route||await evalUi(`!!document.getElementById(${JSON.stringify(key)})`))return;await click(`[data-nav="${route[0]}"]`);if(route[1])await click(`[data-section="${route[1]}"]`);};
+  const toggleCapabilities=async()=>{for(const key of ['autoDeliveryEnabled','autoRefundEnabled','autoReplyEnabled'])await click('#'+key);};
   const until=async(check,label)=>{const deadline=Date.now()+9000;while(Date.now()<deadline){if(await check())return;await wait(100);}throw Error('Timeout: '+label);};
   await wait(400);
   await evalUi('refresh(true)');
@@ -42,27 +47,32 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   assert.equal(engine.snapshot().stats.refundSent,0);
   fs.writeFileSync(path.join(out,'refund-preview.png'),(await window.webContents.capturePage()).toPNG());
   await click('[data-action="close-modal"]'); await click('[data-nav="settings"]');
+  assert.equal(await evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').textContent`),'本机运行');
+  assert.equal(await evalUi(`!!document.querySelector('[data-phone-alerts],#autoReplyEnabled,#suffix')`),false);
+  assert.deepEqual(await evalUi(`Array.from(document.querySelectorAll('[role="tab"]'),el=>el.textContent)`),['本机运行','备份与迁移','连接与版本','异常提醒']);
   await click('#autoReplyEnabled');
   await click('#autoDeliveryEnabled');
   await click('#autoRefundEnabled');
   await click('[data-nav="products"]');
   await click('[data-nav="settings"]');
   for (const key of ['autoReplyEnabled','autoDeliveryEnabled','autoRefundEnabled']) {
+    await openSetting(key);
     assert.equal(await evalUi(`document.querySelector('#${key}').checked`),true,`${key} must survive navigation without an extra Save click`);
     assert.equal(engine.snapshot().config[key],true,`${key} must be persisted`);
   }
   await click('#replySuffixEnabled');await value('#replySuffixMode','time');
   await evalUi(`document.querySelector('#replySuffixMode').dispatchEvent(new Event('change',{bubbles:true}));void 0;`);
   await click('[data-nav="replies"]');assert.match(await evalUi(`document.querySelector('#content').textContent`),/答复末尾附加内容：当前时间/);
-  await click('[data-action="nav-settings"]');await value('#replySuffixMode','invisible');
+  await openSetting('replySuffixMode');await value('#replySuffixMode','invisible');
   await evalUi(`document.querySelector('#replySuffixMode').dispatchEvent(new Event('change',{bubbles:true}));void 0;`);
   await click('[data-nav="products"]');await click('[data-nav="settings"]');
   assert.equal(engine.snapshot().config.replySuffixEnabled,true);assert.equal(engine.snapshot().config.replySuffixMode,'invisible');
   await click('#replyBodySpaceRetryEnabled');await click('[data-nav="products"]');await click('[data-nav="settings"]');
+  await openSetting('replyBodySpaceRetryEnabled');
   assert.equal(engine.snapshot().config.replyBodySpaceRetryEnabled,true);assert.equal(await evalUi(`document.getElementById('replyBodySpaceRetryEnabled').checked`),true);
   fs.writeFileSync(path.join(out,'settings.png'), (await window.webContents.capturePage()).toPNG());
   await value('#suffix','测试统一尾缀');await value('#cooldownSeconds','73');
-  await evalUi(`for(const id of ['suffix','cooldownSeconds'])document.getElementById(id).dispatchEvent(new Event('input',{bubbles:true}));void 0;`);
+  await evalUi(`document.getElementById('cooldownSeconds').dispatchEvent(new Event('input',{bubbles:true}));void 0;`);
   await click('[data-nav="products"]');await click('[data-nav="settings"]');
   assert.equal(engine.snapshot().config.suffix,'测试统一尾缀');assert.equal(engine.snapshot().config.cooldownSeconds,73);
   await click('[data-action="running"]');
@@ -100,12 +110,13 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   await click('[data-action="running"]');assert.equal(engine.snapshot().config.running,false);
   for(const key of ['autoReplyEnabled','autoDeliveryEnabled','autoRefundEnabled']) assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir,'state.json'),'utf8')).config[key],true);
   // Rapid toggles and immediate start must wait for the final persisted values.
-  await evalUi(`for(const key of ['autoReplyEnabled','autoDeliveryEnabled','autoRefundEnabled'])document.getElementById(key).click();void 0;`);
+  await toggleCapabilities();
   await click('[data-nav="products"]');await click('[data-nav="settings"]');
   for(const key of ['autoReplyEnabled','autoDeliveryEnabled','autoRefundEnabled'])assert.equal(engine.snapshot().config[key],false);
   await click('[data-action="running"]');assert.equal(engine.snapshot().config.running,false);
   assert.match(await evalUi(`document.querySelector('#toast').textContent`),/请先在设置中选择/);
-  await evalUi(`for(const key of ['autoReplyEnabled','autoDeliveryEnabled','autoRefundEnabled'])document.getElementById(key).click();document.querySelector('[data-action="running"]').click();void 0;`);
+  await toggleCapabilities();
+  await evalUi(`document.getElementById('autoReplyEnabled').click();document.getElementById('autoReplyEnabled').click();document.querySelector('[data-action="running"]').click();void 0;`);
   await until(()=>engine.snapshot().config.running,'immediate start waits for auto-save');
   await click('[data-action="running"]');
   await until(()=>!engine.snapshot().config.running,'pause after immediate start');
@@ -133,6 +144,7 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   await click('#delivery-fallback-enabled');await click('[data-action="save-delivery-fallback"]');
   await until(()=>engine.snapshot().config.deliveryFallbackEnabled,'delivery default saved');
   assert.equal(engine.snapshot().config.deliveryFallback,'默认发货领取说明（隔离测试）');
+  await click('[data-section="list"]');
   await click('[data-action="simulate-order"]');await value('#simulate-text','没有匹配关键词的商品');await value('#simulate-sku','没有匹配关键词的规格');
   await click('[data-action="run-simulation"]');
   assert.match(await evalUi(`document.querySelector('#simulation-result').textContent`),/未匹配默认发货.*默认发货领取说明/su);
@@ -168,6 +180,7 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   await click('[data-action="save-rule"]');assert.equal(engine.snapshot().config.products[0].images[0].id,media.id);
   await click('[data-action="edit-product"]');assert.equal(await evalUi(`document.querySelectorAll('.media-item').length`),1);await click('[data-action="close-modal"]');
   await click('[data-nav="settings"]');await click('#separateLinksEnabled');await click('[data-nav="products"]');await click('[data-nav="settings"]');
+  await openSetting('separateLinksEnabled');
   assert.equal(engine.snapshot().config.separateLinksEnabled,true);assert.equal(await evalUi(`document.getElementById('separateLinksEnabled').checked`),true);
   await value('#maxPerMinute','120');await evalUi(`document.getElementById('maxPerMinute').dispatchEvent(new Event('input',{bubbles:true}));void 0;`);await click('[data-nav="products"]');
   const mediaOrder={...event,orderId:'media-order',buyerId:'media-buyer',eligible:true,shipped:false};platform.data.orders.set(mediaOrder.orderId,mediaOrder);
@@ -217,8 +230,27 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   phoneAlerts.observe(offline(4));assert.equal(desktopAlert.window,null);assert.equal(engine.snapshot().config.running,true);
   phoneAlerts.observe({wanted:true,online:true,healthy:true,failures:[]});alertClock+=60000;phoneAlerts.observe({wanted:true,online:true,healthy:true,failures:[]});phoneAlerts.monitor.now=realNow;
   assert.equal(desktopAlert.notice,null);
+  const beforeTabNavigation=engine.snapshot().config;
+  for(const [owner,keys]of [['products',['list','delivery']],['replies',['content','strategy','recovery']],['settings',['runtime','backup','connection','alerts']]]){
+    await click(`[data-nav="${owner}"]`);
+    for(const key of keys){await click(`[data-section="${key}"]`);assert.equal(await evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dataset.section`),key);}
+  }
+  assert.deepEqual(engine.snapshot().config,beforeTabNavigation,'browsing settings never pauses or changes configuration');
+  await openSetting('replyDelaySeconds');assert.equal(await evalUi('phoneAlertDraft'),null,'viewing alerts does not create an unsaved draft');const originalDelay=engine.snapshot().config.replyDelaySeconds;
+  await value('#replyDelaySeconds','-1');await evalUi(`document.getElementById('replyDelaySeconds').dispatchEvent(new Event('input',{bubbles:true}));void 0;`);
+  await click('[data-section="content"]');assert.equal(await evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dataset.section`),'strategy');assert.equal(engine.snapshot().config.replyDelaySeconds,originalDelay);
+  await value('#replyDelaySeconds',String(originalDelay));await click('[data-section="content"]');
+  await evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));void 0;`);
+  await until(()=>evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dataset.section==='recovery'`),'keyboard tab navigation');
+  await click('[data-action="running"]');await until(()=>engine.snapshot().config.running,'resume after editing isolated test settings');
   await click('[data-nav="settings"]');
+  assert.equal(await evalUi(`!!document.querySelector('[data-phone-alerts]')`),false);
+  await click('[data-section="alerts"]');
   assert.equal(await evalUi(`!!document.querySelector('[data-phone-alerts]')`),true);
+  await value('#alert-seconds','90');await evalUi(`document.getElementById('alert-seconds').dispatchEvent(new Event('input',{bubbles:true}));void 0;`);
+  await click('[data-section="runtime"]');assert.equal(phoneAlerts.snapshot().config.failureSeconds,60);assert.equal(engine.snapshot().config.running,true);
+  await click('[data-section="alerts"]');assert.equal(await evalUi(`document.getElementById('alert-seconds').value`),'90');
+  await value('#alert-seconds','60');await evalUi(`document.getElementById('alert-seconds').dispatchEvent(new Event('input',{bubbles:true}));void 0;`);
   assert.equal(await evalUi("document.querySelector('#alert-desktop').checked"),true);
   const phoneKey='SCT'+'fixture'.repeat(8);
   await value('#alert-token',phoneKey);await click('#alert-enabled');
@@ -230,6 +262,7 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   await click('[data-action="phone-alert-test"]');assert.equal(phoneNotices.length,1);
   assert.equal(await evalUi(`state.phoneAlerts.test.status`),'accepted');assert.equal(engine.snapshot().config.running,true);
   await click('[data-nav="products"]');await click('[data-nav="settings"]');
+  await click('[data-section="alerts"]');
   assert.equal(await evalUi(`document.querySelector('#alert-enabled').checked`),true);
   fs.writeFileSync(path.join(out,'phone-alert-settings.png'),(await window.webContents.capturePage()).toPNG());
   await click('[data-action="desktop-alert-test"]');
@@ -249,6 +282,8 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   results.backgroundRejectedAttempts=backgroundRejectedAttempts;
   results.assertions.push('a platform notice cannot hide an offline pending inquiry from maintenance','notice-covered inquiry uses configured fallback and requires a receipt','a second scan does not duplicate a notice-covered reply');
   results.assertions.push('phone reminder settings persist without pausing business','phone credentials are never echoed in snapshots or input fields','manual phone test uses only the isolated notification service','phone monitor observes the real application connection state');
+  results.assertions.push('helper settings default to local runtime and place alerts last','reply, delivery and refund controls save from their own pages','tab switches preserve settings and share the existing link preference');
+  results.assertions.push('browsing every settings category leaves active listening unchanged','invalid delay prevents leaving its tab without changing persisted settings','arrow/home/end tab navigation is accessible','unsaved alert drafts survive switching tabs without saving or pausing');
   results.fixturePhoneNotices=phoneNotices.length;
   results.assertions.push('local image selection saves metadata without sending to a buyer','image editor restores saved attachments','standalone URL setting auto-saves across navigation','text then exact URL then image precede shipment','image rejection persists and retries without resending previous parts','part receipts are visible in processing details');
   results.fixtureAssetUploads=fixtureAssetUploads;results.imageRejections=imageRejections;

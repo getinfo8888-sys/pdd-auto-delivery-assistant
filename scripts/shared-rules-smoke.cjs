@@ -32,7 +32,7 @@ async function run({ app, window, engine, dataDir, configureTestPlatform }) {
   };
   const assertions = [];
   try {
-    await ui('refresh(true)'); await click('[data-nav="settings"]');
+    await ui('refresh(true)'); await click('[data-nav="settings"]');await click('[data-section="backup"]');
     await click('[data-action="shared-export"][data-scope="delivery"]');
     const exported = JSON.parse(fs.readFileSync(exportFile, 'utf8'));
     assert.equal(exported.format, 'local-commerce-content');

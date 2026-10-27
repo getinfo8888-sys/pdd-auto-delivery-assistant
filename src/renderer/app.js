@@ -18,6 +18,8 @@ const settingNumberKeys=['cooldownSeconds','maxPerMinute','firstReplyIntervalMin
 const settingKeys=new Set([...settingBooleanKeys,...settingNumberKeys,'suffix','replySuffixMode']);
 let settingsDraft={},settingsSaveTail=Promise.resolve(),settingsPending=0,settingsSaveError=null,settingsTimer,navigationRevision=0;
 let phoneAlertDraft=null;
+const defaultSections={products:'list',replies:'content',settings:'runtime'};
+const sections={...defaultSections};
 let lastAutoPromptKey='';
 const icons = { dashboard:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z', shop:'M3 10v11h18V10 M2 4h20l-2 6H4z M9 21v-7h6v7', box:'M3 7l9-5 9 5-9 5z M3 7v11l9 5 9-5V7 M12 12v11', chat:'M21 11a8 8 0 01-8 8H6l-4 3V8a7 7 0 017-7h5a7 7 0 017 7z M7 8h9 M7 12h6', queue:'M5 4h14v17H5z M9 2h6v4H9z M8 11h8 M8 15h5', log:'M5 3h12l3 3v15H5z M9 8h6 M9 12h7 M9 16h5', settings:'M12 8a4 4 0 100 8 4 4 0 000-8 M9 2h6l1 4 4 1 2 5-3 3 1 4-5 3-3-3-4 1-3-5 3-3-1-4z', plus:'M12 5v14 M5 12h14', search:'M10 3a7 7 0 110 14 7 7 0 010-14 M15 15l6 6', arrow:'M5 12h14 M14 7l5 5-5 5', link:'M9 15l6-6 M7 13l-2 2a4 4 0 006 6l4-4 M17 11l2-2a4 4 0 00-6-6L9 7', check:'M4 12l5 5L20 6', clock:'M12 2a10 10 0 100 20 10 10 0 000-20 M12 6v6l4 2', play:'M8 4l12 8-12 8z', pause:'M8 4v16 M16 4v16', export:'M12 3v12 M7 8l5-5 5 5 M4 14v7h16v-7', refresh:'M20 7a9 9 0 10.5 9 M20 2v6h-6' };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[name] || icons.box}"/></svg>`;
@@ -76,10 +78,10 @@ function rememberSetting(element) {
 }
 async function flushSettings() {
   clearTimeout(settingsTimer);
-  if (page==='settings') for(const key of settingKeys) rememberSetting(document.getElementById(key));
+  for(const key of settingKeys) rememberSetting(document.getElementById(key));
   if (!Object.keys(settingsDraft).length) {await settingsSaveTail;return;}
   for(const key of Object.keys(settingsDraft)) {
-    const element=page==='settings'?document.getElementById(key):null;
+    const element=document.getElementById(key);
     if (element && !element.checkValidity() || settingNumberKeys.includes(key) && !Number.isFinite(settingsDraft[key])) {
       element?.reportValidity();throw new Error('请填写有效的设置数值');
     }
@@ -112,6 +114,12 @@ function updateHeader() {
 function heading(title, subtitle, actions='') { return `<div class="page-heading"><div><h1>${title}</h1><p>${subtitle}</p></div><div class="heading-actions">${actions}</div></div>`; }
 function empty(title, subtitle, action='') { return `<div class="empty"><div class="empty-icon">${icon('box')}</div><h3>${title}</h3><p>${subtitle}</p>${action}</div>`; }
 function button(text, action, primary=false, attrs='') { return `<button type="button" class="button ${primary?'primary':''}" data-action="${action}" ${attrs}>${text}</button>`; }
+function sectionTabs(owner,items) {
+  return `<div class="section-tabs" role="tablist" aria-label="${esc(navItems.find(row=>row[0]===owner)[2])}分类">${items.map(([key,title])=>`<button type="button" role="tab" id="${owner}-${key}-tab" aria-controls="${owner}-panel" aria-selected="${sections[owner]===key}" tabindex="${sections[owner]===key?0:-1}" data-section="${key}" class="section-tab ${sections[owner]===key?'active':''}">${title}${owner==='settings'&&key==='alerts'&&phoneAlertDraft?'<span class="tab-draft">待保存</span>':''}</button>`).join('')}</div>`;
+}
+function sectionPanel(owner,content) {return `<div role="tabpanel" id="${owner}-panel" aria-labelledby="${owner}-${sections[owner]}-tab">${content}</div>`;}
+function settingSaveBar() {return `<div class="settings-save-bar"><span id="settings-save-state" class="small-note" role="status"></span>${button('立即保存','save-settings')}</div>`;}
+function numberSetting(c,key,label,min,max) {return `<label class="field"><span>${label}</span><input id="${key}" type="number" min="${min}" max="${max}" value="${c[key]}"></label>`;}
 function jobTable(rows, controls=false) {
   if (!rows.length) return empty('这里还没有处理记录','添加规则后可以先在本机预览。连接店铺并完成页面校验后，实际处理记录会出现在这里。',button('预览一笔订单','simulate-order'));
   return `<div class="table-wrap"><table><thead><tr><th>任务 / 商品</th><th>买家</th><th>匹配规则</th><th>状态</th><th>时间</th><th></th></tr></thead><tbody>${rows.map(job=>`<tr><td><strong>${jobTypes[job.type] || '任务'}${job.simulation?' · 预览':''}</strong><small>${esc(job.title || job.orderId || '客服消息')}${job.sku?' · '+esc(job.sku):''}</small></td><td>${esc(job.buyerName || job.buyerId)}<small>${esc(job.shopId)}</small></td><td>${esc(job.matchName || '—')}</td><td>${label(job)}${job.reason?`<small>${esc(reason(job.reason))}</small>`:''}</td><td class="subtle">${fmt(job.createdAt)}</td><td class="row-actions"><button data-action="job" data-id="${esc(job.id)}">查看${controls&&job.status==='uncertain'?' / 核实':''}</button></td></tr>`).join('')}</tbody></table></div>`;
@@ -129,19 +137,22 @@ function dashboard() {
   <div class="two-columns"><section class="panel"><div class="panel-head"><h2>最近处理</h2><button class="muted-link" data-nav="records">全部记录 ↗</button></div>${jobTable(jobs().slice(0,5))}</section><div><section class="panel"><div class="panel-head"><h2>开始配置</h2><span class="badge">本机</span></div><div class="panel-body">${[['box','添加发货内容','商品关键词与对应的网盘链接','add-product'],['chat','设置智能答复','欢迎语、试玩与默认回复','nav-replies'],['play','预览一笔订单','只在本机计算，不发送给买家','simulate-order']].map(([i,title,sub,action])=>`<button class="quick-action" data-action="${action}"><span class="tile">${icon(i)}</span><span><strong>${title}</strong><small>${sub}</small></span><span>›</span></button>`).join('')}</div></section><section class="panel"><div class="panel-head"><h2>店铺连接</h2><span class="badge ${ready?'green':'orange'}">${ready?'当前会话已校验':'待校验'}</span></div><div class="panel-body"><div class="subtle" style="line-height:1.9">${esc(state.connection.diagnostics.chat.message)}<br>首次使用需在官方页面扫码登录，并校验取数与发送回执。</div><div style="margin-top:16px">${button('打开店铺工作台','open-shop')}</div></div></section></div></div><div class="page-end">本地规则 · 独立网页登录会话 · 发送结果可追溯</div>`;
 }
 function products() {
+  const navigation=sectionTabs('products',[['list','发货内容列表'],['delivery','发货设置']]);
+  if(sections.products==='delivery')return heading('发货内容','默认内容、统一尾缀和发送方式都在这里管理。')+navigation+sectionPanel('products',deliverySettings());
   const rows=[...state.config.products].reverse().filter(p=>(p.name+' '+p.keywords.join(' ')).toLowerCase().includes(filter.toLowerCase()));
   return `${heading('发货内容','商品名称或 SKU / 规格包含设定关键词，就发送对应内容。',button(icon('plus')+'添加发货内容','add-product',true))}
-  <div class="banner">${icon('link')}<span>商品名称或 SKU 包含设置的关键词时，发送对应内容与统一尾缀。多个不同内容同时命中时，任务会转入待处理。</span></div>
+  ${navigation}${sectionPanel('products',`<div class="banner">${icon('link')}<span>商品名称或 SKU 包含设置的关键词时，发送对应内容与统一尾缀。多个不同内容同时命中时，任务会转入待处理。</span></div>
   <div class="toolbar"><div class="search">${icon('search')}<input class="text-input" id="search" placeholder="搜索名称或关键词" value="${esc(filter)}"></div><span class="subtle">共 ${state.config.products.length} 条发货内容</span>${button('预览匹配','simulate-order')}</div>
-  <section class="panel">${rows.length?`<div class="table-wrap"><table><thead><tr><th>内容名称</th><th>匹配范围 / 关键词</th><th>发货正文</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map(p=>`<tr><td><strong class="product-name">${esc(p.name)}</strong>${p.excludeKeywords.length?`<small>排除：${esc(p.excludeKeywords.join('、'))}</small>`:''}</td><td>${esc(matchTargets[p.matchTarget] || matchTargets.either)}<br>${keywordList(p.keywords)}</td><td><div class="cell-content">${esc(p.content)}</div></td><td><span class="badge ${p.enabled?'green':''}">${p.enabled?'启用中':'已停用'}</span></td><td class="row-actions"><button data-action="edit-product" data-id="${esc(p.id)}">编辑</button><button data-action="toggle-product" data-id="${esc(p.id)}">${p.enabled?'停用':'启用'}</button><button class="muted" data-action="remove-product" data-id="${esc(p.id)}">删除</button></td></tr>`).join('')}</tbody></table></div>`:empty('添加你的第一条发货内容','填上商品名称、标题中的关键词与网盘链接，统一的领取说明可在助手设置中添加。',button('添加发货内容','add-product',true))}</section>
-  <section class="panel"><div class="panel-head"><h2>未匹配默认发货</h2><span class="badge ${state.config.deliveryFallbackEnabled?'green':''}">${state.config.deliveryFallbackEnabled?'已启用':'未启用'}</span></div><div class="panel-body"><div class="content-preview">${esc(state.config.deliveryFallback || '尚未设置默认发货内容')}</div><p class="small-note">商品名称和 SKU 均未匹配到关键词时使用，也会附加统一尾缀。发送成功后按现有开关自动确认发货；多条规则冲突时保留核实。</p>${button('设置默认发货内容','edit-delivery-fallback')}</div></section>
-  <section class="panel"><div class="panel-head"><h2>统一尾缀</h2><button class="muted-link" data-nav="settings">修改尾缀 ↗</button></div><div class="panel-body"><div class="content-preview">${esc(state.config.suffix || '暂未设置统一尾缀')}</div><div class="small-note">发货时自动附加在正文之后；预览中会展示完整消息。</div></div></section>`;
+  <section class="panel">${rows.length?`<div class="table-wrap"><table><thead><tr><th>内容名称</th><th>匹配范围 / 关键词</th><th>发货正文</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map(p=>`<tr><td><strong class="product-name">${esc(p.name)}</strong>${p.excludeKeywords.length?`<small>排除：${esc(p.excludeKeywords.join('、'))}</small>`:''}</td><td>${esc(matchTargets[p.matchTarget] || matchTargets.either)}<br>${keywordList(p.keywords)}</td><td><div class="cell-content">${esc(p.content)}</div></td><td><span class="badge ${p.enabled?'green':''}">${p.enabled?'启用中':'已停用'}</span></td><td class="row-actions"><button data-action="edit-product" data-id="${esc(p.id)}">编辑</button><button data-action="toggle-product" data-id="${esc(p.id)}">${p.enabled?'停用':'启用'}</button><button class="muted" data-action="remove-product" data-id="${esc(p.id)}">删除</button></td></tr>`).join('')}</tbody></table></div>`:empty('添加你的第一条发货内容','填上商品名称、标题中的关键词与网盘链接，统一的领取说明可在“发货设置”标签中添加。',button('添加发货内容','add-product',true))}</section>
+  `)}`;
 }
 function replies() {
-  return `${heading('智能答复','让买家先收到清楚的介绍，再按关键词获取需要的信息。',button('答复策略','nav-settings')+button(icon('plus')+'添加关键词答复','add-reply',true))}
-  <div class="small-note">答复末尾附加内容：${state.config.replySuffixEnabled?(state.config.replySuffixMode==='time'?'当前时间':'随机不可见字符'):'未启用'}。可在“答复策略”中设置。</div>
+  const navigation=sectionTabs('replies',[['content','答复内容'],['strategy','答复策略'],['recovery','待回复保障']]);
+  if(sections.replies!=='content')return heading('智能答复','欢迎、等待人工介入和补答策略，按需要分别设置。')+navigation+sectionPanel('replies',sections.replies==='strategy'?replyStrategy():replyRecovery());
+  return `${heading('智能答复','让买家先收到清楚的介绍，再按关键词获取需要的信息。',button(icon('plus')+'添加关键词答复','add-reply',true))}${navigation}${sectionPanel('replies',`
+  <div class="small-note">答复末尾附加内容：${state.config.replySuffixEnabled?(state.config.replySuffixMode==='time'?'当前时间':'随机不可见字符'):'未启用'}。可在“答复策略”标签中设置。</div>
   <div class="two-columns"><section class="panel"><div class="panel-head"><h2>首次欢迎语</h2><span class="badge ${state.config.greetingEnabled?'green':''}">${state.config.greetingEnabled?'已启用':'已关闭'}</span></div><div class="panel-body"><div class="content-preview">${esc(state.config.greeting)}</div><div class="small-note">距上次咨询超过 ${state.config.firstReplyIntervalMinutes} 分钟时重新欢迎。欢迎语与关键词答复分别按设定延迟发送。</div><div style="margin-top:15px">${button('编辑欢迎语','edit-greeting')}</div></div></section><section class="panel"><div class="panel-head"><h2>未匹配默认答复</h2></div><div class="panel-body"><div class="content-preview">${esc(state.config.fallback || '未设置默认答复')}</div><div class="small-note">未命中关键词时使用。一般答复延迟为人工处理留时间；相同原文按成功发送后的冷却间隔限制。</div><div style="margin-top:15px">${button('编辑默认答复','edit-fallback')}</div></div></section></div>
-  <section class="panel"><div class="panel-head"><h2>关键词答复 <span class="rule-count">${state.config.replyRules.length} 条</span></h2>${button('预览咨询答复','simulate-message')}</div>${state.config.replyRules.length?`<div class="table-wrap"><table><thead><tr><th>规则名称</th><th>匹配词</th><th>回复正文</th><th>状态</th><th>操作</th></tr></thead><tbody>${state.config.replyRules.map(r=>`<tr><td><strong>${esc(r.name)}</strong></td><td>${esc(matchTypes[r.matchType] || matchTypes.contains)}<br>${keywordList(r.keywords)}</td><td><div class="cell-content">${esc(r.content)}</div></td><td><span class="badge ${r.enabled?'green':''}">${r.enabled?'已启用':'已停用'}</span></td><td class="row-actions"><button data-action="edit-reply" data-id="${esc(r.id)}">编辑</button><button data-action="toggle-reply" data-id="${esc(r.id)}">${r.enabled?'停用':'启用'}</button><button class="muted" data-action="remove-reply" data-id="${esc(r.id)}">删除</button></td></tr>`).join('')}</tbody></table></div>`:empty('设置“试玩”等关键词','例如买家说“想试玩”，自动回复你设置的试玩网盘链接。',button('添加关键词答复','add-reply',true))}</section>`;
+  <section class="panel"><div class="panel-head"><h2>关键词答复 <span class="rule-count">${state.config.replyRules.length} 条</span></h2>${button('预览咨询答复','simulate-message')}</div>${state.config.replyRules.length?`<div class="table-wrap"><table><thead><tr><th>规则名称</th><th>匹配词</th><th>回复正文</th><th>状态</th><th>操作</th></tr></thead><tbody>${state.config.replyRules.map(r=>`<tr><td><strong>${esc(r.name)}</strong></td><td>${esc(matchTypes[r.matchType] || matchTypes.contains)}<br>${keywordList(r.keywords)}</td><td><div class="cell-content">${esc(r.content)}</div></td><td><span class="badge ${r.enabled?'green':''}">${r.enabled?'已启用':'已停用'}</span></td><td class="row-actions"><button data-action="edit-reply" data-id="${esc(r.id)}">编辑</button><button data-action="toggle-reply" data-id="${esc(r.id)}">${r.enabled?'停用':'启用'}</button><button class="muted" data-action="remove-reply" data-id="${esc(r.id)}">删除</button></td></tr>`).join('')}</tbody></table></div>`:empty('设置“试玩”等关键词','例如买家说“想试玩”，自动回复你设置的试玩网盘链接。',button('添加关键词答复','add-reply',true))}</section>`)}`;
 }
 const chatFields=[['buyer','当前会话买家标识'],['incoming','一条买家消息气泡'],['input','消息输入框'],['send','发送按钮'],['outgoing','一条历史商家消息气泡'],['receipt','发送成功 / 送达标记']];
 const orderFields=[['row','一条完整订单卡片'],['orderId','订单号'],['title','商品标题'],['buyer','订单中的买家标识'],['status','订单付款 / 发货状态'],['paidAt','付款时间'],['contact','联系买家链接']];
@@ -168,25 +179,49 @@ function records() {
   return `${heading('运行记录','本地预览与真实发送分别标记，便于回看每一次处理结果。',button('刷新记录','refresh'))}<section class="panel"><div class="panel-head"><h2>消息与订单</h2><span class="subtle">最近 ${state.jobs.length} 项</span></div>${jobTable(jobs())}</section><section class="panel"><div class="panel-head"><h2>状态日志</h2></div><div class="panel-body">${coreLogs.length||notes.length?[...notes.map(n=>({time:n.time,message:n.message})),...coreLogs.map(l=>({time:l.time||l.createdAt||l.at,message:l.message||l.detail||l.event||JSON.stringify(l)}))].sort((a,b)=>(b.time||0)-(a.time||0)).slice(0,70).map(l=>`<div class="log-item"><time>${l.time?fmt(l.time):'本机记录'}</time><p>${esc(typeof l.message==='string'?l.message:JSON.stringify(l.message))}</p></div>`).join(''):'<div class="subtle">暂时没有运行日志。</div>'}</div></section>`;
 }
 function switchRow(title, description, key, checked) { return `<div class="toggle-row"><div><strong>${title}</strong><p>${description}</p></div><label class="switch"><input type="checkbox" id="${key}" ${checked?'checked':''}><i></i></label></div>`; }
-function settings() {
-  const c={...state.config,...settingsDraft};
-  const number=(key,label,min,max)=>`<label class="field"><span>${label}</span><input id="${key}" type="number" min="${min}" max="${max}" value="${c[key]}"></label>`;
-  return `${heading('助手设置','业务设置自动保存，修改时会暂停监听；异常提醒单独保存，不会暂停监听。',button('立即保存','save-settings',true))}<div id="settings-save-state" class="small-note" role="status">业务设置更改已自动保存</div>
-  ${phoneAlertPanel()}
-  <section class="panel"><div class="panel-head"><h2>手机复制链接与图片</h2></div><div class="panel-body">${switchRow('正文后单独发送纯链接','保留原来的介绍，再将其中每条网址单独发一条，便于手机长按复制。纯链接不添加说明、时间或不可见字符。','separateLinksEnabled',c.separateLinksEnabled)}<p class="small-note">图片 / 二维码可在“发货内容”或“智能答复”的编辑窗口中添加。发送顺序：正文 → 纯链接 → 图片；全部成功后再确认发货。链接能否直接点击由拼多多客户端决定。</p></div></section>
-  <div class="two-columns"><div><section class="panel"><div class="panel-head"><h2>自动处理</h2></div><div class="panel-body">
-  ${switchRow('智能答复','按欢迎语、匹配规则与默认答复处理新咨询。','autoReplyEnabled',c.autoReplyEnabled)}
-  ${switchRow('自动发送发货内容','扫描官方待发货订单，按商品名或 SKU 匹配正文。启动时包含尚未处理的待发货订单。','autoDeliveryEnabled',c.autoDeliveryEnabled)}
-  ${switchRow('发送后自动确认发货','只在内容取得发送成功回执后，提交官方虚拟发货。','autoConfirmShipmentEnabled',c.autoConfirmShipmentEnabled)}
-  ${switchRow('退款申请自动同意','检测到需商家同意的退款申请后立即提交，不设置金额限制或人工审核。','autoRefundEnabled',c.autoRefundEnabled)}
-  </div></section><section class="panel"><div class="panel-head"><h2>统一发货尾缀</h2></div><div class="panel-body"><label class="field"><textarea id="suffix" rows="4">${esc(c.suffix)}</textarea></label></div></section>
-  <section class="panel"><div class="panel-head"><h2>智能答复策略</h2></div><div class="panel-body">${switchRow('首次欢迎语','首次咨询，或超过下方设定的咨询间隔后重新发送。','greetingEnabled',c.greetingEnabled)}${switchRow('答复末尾附加内容','为智能答复附加不可见字符或当前时间，减少相同文本；仍按正文冷却和发送上限处理。','replySuffixEnabled',c.replySuffixEnabled)}<label class="field"><span>末尾内容</span><select id="replySuffixMode"><option value="invisible" ${c.replySuffixMode==='invisible'?'selected':''}>随机不可见字符</option><option value="time" ${c.replySuffixMode==='time'?'selected':''}>当前时间</option></select></label><div class="small-note">仅用于欢迎语、关键词答复和默认答复；正文以网址结尾时跳过不可见字符，避免影响链接。平台是否接受消息，以实际回执为准。</div>${switchRow('人工答复时停止等待中的自动答复','同一买家由人工接手后，取消尚未发送的自动答复。','manualInterventionEnabled',c.manualInterventionEnabled)}<div class="form-grid">${number('firstReplyIntervalMinutes','重新欢迎的咨询间隔（分钟）',1,1440)}${number('firstReplyDelaySeconds','欢迎语延迟（秒）',0,3600)}${number('replyDelaySeconds','一般答复延迟（秒）',0,3600)}${number('cooldownSeconds','相同正文冷却（秒）',0,86400)}${number('maxPerMinute','每分钟最多发送消息（条）',1,120)}</div><div class="small-note">欢迎语按欢迎语延迟发送；关键词和默认答复先等待一般答复延迟，规则独立延迟优先。等待期间识别到人工已发送回复便取消待发自动答复。相同正文冷却从同一买家上一条相同原文成功发送时起算，不比较随机字符或时间尾缀，也不是每次咨询后的固定等待时间。</div></div></section></div>
-  <div><section class="panel"><div class="panel-head"><h2>本机运行</h2></div><div class="panel-body">${switchRow('打开软件自动监听','使用已开启的答复、发货和退款功能；需要登录或验证时，完成后自动继续。','autoListenOnLaunch',c.autoListenOnLaunch)}${switchRow('启动时补答待回复会话','分页检查近七天官方待回复聊天，按当前关键词或默认回复补答；已成功和结果不明的消息不重复发送。','catchUpUnrepliedEnabled',c.catchUpUnrepliedEnabled)}${switchRow('开机打开工作台','登录 Windows 后打开软件；是否自动监听由上面的开关决定。','startup',settingsDraft.startup ?? state.startup)}${button('收起到托盘','background')}<div class="small-note">修改设置会暂停本次监听。电脑关机、休眠或退出程序后无法继续处理。</div></div></section>
-  <section class="panel"><div class="panel-head"><h2>待回复保障</h2></div><div class="panel-body"><p>重复拒绝后保留为“等待补答”，继续核验并重试。先尝试当前时间尾缀，再添加随机消息标记。每次启动重新检查，运行中每分钟复查。</p>${switchRow('多次判重后尝试正文随机空格','连续3次明确判重后，在汉字之间随机插入3个普通空格；保护链接和提取码，配置原文保留。','replyBodySpaceRetryEnabled',c.replyBodySpaceRetryEnabled)}<div class="small-note">安全位置不足时继续使用时间和消息标记。补答使用你配置的答复内容；发货正文不受影响。只有平台确认成功，或官方确认已有回复、出现新咨询时，才停止旧任务。断线或结果不明先核实，避免重复发送。</div></div></section>
-  <section class="panel"><div class="panel-head"><h2>规则备份</h2></div><div class="panel-body"><div class="heading-actions">${button('导出规则','backup')}${button('导入规则','import')}</div><div class="small-note">备份包含规则与设置；导入后自动处理关闭。</div><button class="link-button" data-action="data-folder">打开本机数据目录 ↗</button></div></section>
-  <section class="panel"><div class="panel-head"><h2>规则迁移</h2></div><div class="panel-body"><p>淘宝助手单独运行，通过下面两类文件迁移规则。导入一类内容，不会覆盖另一类的内容。</p>${[['replies','智能答复规则','关键词、匹配方式、答复正文、欢迎语与默认答复'],['delivery','发货规则','商品 / SKU 关键词、排除词、网盘正文与发货尾缀']].map(([scope,label,description])=>`<h3>${label}</h3><p class="small-note">${description}</p><div class="heading-actions">${button('导出'+label,'shared-export',false,`data-scope="${scope}"`)}${button('导入并预览','shared-import',false,`data-scope="${scope}"`)}</div>`).join('')}<p class="small-note">兼容旧规则备份，仅提取所选类别。图片和平台专属规则需单独处理。先暂停监听再确认导入，原规则自动备份。</p></div></section>
-  <section class="panel"><div class="panel-head"><h2>官方连接</h2></div><div class="panel-body"><p>${esc(state.connection.diagnostics.chat.message)}</p>${button('检测官方连接','check-platform')}${button('打开店铺页面','open-shop')}<div class="small-note">实际发送、确认发货和退款结果，请在运行记录中核对平台回执。</div></div></section><div class="small-note">拼多多自动发货助手 v${esc(state.version)}</div></div></div>`;
+function messageLinkSettings(c) {
+  return `<section class="panel"><div class="panel-head"><h2>链接与图片发送</h2></div><div class="panel-body">${switchRow('正文后单独发送纯链接','介绍正文之后，将每条网址单独发送，便于手机长按复制。此开关同时适用于发货和智能答复。','separateLinksEnabled',c.separateLinksEnabled)}<p class="small-note">纯链接不添加说明、时间或不可见字符。图片 / 二维码在对应内容的编辑窗口中添加，发送顺序为正文 → 纯链接 → 图片；发货内容全部确认成功后，再按设置确认发货。</p></div></section>`;
 }
+function deliverySettings() {
+  const c={...state.config,...settingsDraft};
+  return `<div class="settings-stack">${settingSaveBar()}<p class="settings-hint">设置更改自动保存，并暂停本次监听；核对后可重新开始监听。</p>
+  <section class="panel"><div class="panel-head"><h2>自动发货</h2></div><div class="panel-body">${switchRow('自动发送发货内容','按商品名称或 SKU 匹配内容；启动时也会扫描尚未处理的待发货订单。','autoDeliveryEnabled',c.autoDeliveryEnabled)}${switchRow('发送后自动确认发货','内容取得发送成功回执后，才提交官方虚拟发货。','autoConfirmShipmentEnabled',c.autoConfirmShipmentEnabled)}</div></section>
+  <section class="panel"><div class="panel-head"><h2>未匹配默认发货</h2><span class="badge ${c.deliveryFallbackEnabled?'green':''}">${c.deliveryFallbackEnabled?'已启用':'未启用'}</span></div><div class="panel-body"><div class="content-preview">${esc(c.deliveryFallback || '尚未设置默认发货内容')}</div><p class="small-note">商品名称和 SKU 均未命中时使用，也会附加统一尾缀。多个不同内容同时命中时，保留到待处理核实。</p>${button('设置默认发货内容','edit-delivery-fallback')}</div></section>
+  <section class="panel"><div class="panel-head"><h2>统一发货尾缀</h2></div><div class="panel-body"><label class="field"><span>每条发货正文后附加的说明</span><textarea id="suffix" rows="4" placeholder="输入统一的领取说明或使用提示">${esc(c.suffix)}</textarea><small>匹配发货和默认发货都使用此尾缀；单独发送的纯链接不附加尾缀。</small></label></div></section>
+  ${messageLinkSettings(c)}</div>`;
+}
+function replyStrategy() {
+  const c={...state.config,...settingsDraft};
+  return `<div class="settings-stack">${settingSaveBar()}<p class="settings-hint">设置更改自动保存，并暂停本次监听；核对后可重新开始监听。</p>
+  <section class="panel"><div class="panel-head"><h2>自动答复与人工介入</h2></div><div class="panel-body">${switchRow('启用智能答复','按欢迎语、关键词与默认答复处理新咨询。','autoReplyEnabled',c.autoReplyEnabled)}${switchRow('首次欢迎语','首次咨询，或超过设定的咨询间隔后重新发送。','greetingEnabled',c.greetingEnabled)}${switchRow('人工答复时停止等待中的自动答复','同一买家由人工接手后，取消尚未发送的自动答复。','manualInterventionEnabled',c.manualInterventionEnabled)}</div></section>
+  <section class="panel"><div class="panel-head"><h2>答复时间</h2></div><div class="panel-body"><div class="form-grid">${numberSetting(c,'firstReplyDelaySeconds','欢迎语延迟（秒）',0,3600)}${numberSetting(c,'replyDelaySeconds','一般答复延迟（秒）',0,3600)}${numberSetting(c,'firstReplyIntervalMinutes','重新欢迎的咨询间隔（分钟）',1,1440)}${numberSetting(c,'cooldownSeconds','相同正文冷却（秒）',0,86400)}</div><p class="small-note">首次欢迎语按欢迎语延迟发送；关键词和默认答复先等待一般答复延迟，规则独立延迟优先。等待期间识别到人工已回复便取消待发答复。相同正文冷却从同一买家上一条相同原文成功发送时起算，不比较随机字符或时间尾缀，也不是每次咨询后的固定等待时间。</p></div></section>
+  <section class="panel"><div class="panel-head"><h2>答复末尾附加内容</h2></div><div class="panel-body">${switchRow('启用答复末尾附加内容','仅作用于欢迎语、关键词答复和默认答复；仍受正文冷却和发送上限限制。','replySuffixEnabled',c.replySuffixEnabled)}<label class="field"><span>末尾内容</span><select id="replySuffixMode"><option value="invisible" ${c.replySuffixMode==='invisible'?'selected':''}>随机不可见字符</option><option value="time" ${c.replySuffixMode==='time'?'selected':''}>当前时间</option></select></label><p class="small-note">正文以网址结尾时跳过不可见字符，避免影响链接。平台是否接受消息，以实际回执为准。</p></div></section>
+  ${messageLinkSettings(c)}</div>`;
+}
+function replyRecovery() {
+  const c={...state.config,...settingsDraft};
+  return `<div class="settings-stack">${settingSaveBar()}<p class="settings-hint">设置更改自动保存，并暂停本次监听；核对后可重新开始监听。</p>
+  <section class="panel"><div class="panel-head"><h2>待回复检查</h2></div><div class="panel-body">${switchRow('启动时补答待回复会话','分页检查近七天官方待回复聊天，按当前关键词或默认回复补答；运行中也会定期复查。','catchUpUnrepliedEnabled',c.catchUpUnrepliedEnabled)}<p class="small-note">已成功和结果不明的消息先核实，不重复发送。欢迎语、关键词和默认答复在“答复内容”中编辑。</p></div></section>
+  <section class="panel"><div class="panel-head"><h2>发送失败后的补答</h2></div><div class="panel-body"><p>重复拒绝后保留为“等待补答”，继续核验并重试。先尝试当前时间尾缀，再添加随机消息标记。每次启动重新检查，运行中每分钟复查。</p>${switchRow('多次判重后尝试正文随机空格','连续3次明确判重后，在汉字之间随机插入3个普通空格；保护链接和提取码，配置原文保留。','replyBodySpaceRetryEnabled',c.replyBodySpaceRetryEnabled)}<p class="small-note">安全位置不足时继续使用时间和消息标记。补答使用已配置的答复内容；发货正文不受影响。只有平台确认成功，或官方确认已有回复、出现新咨询时，才停止旧任务。断线或结果不明先核实，避免重复发送。</p></div></section></div>`;
+}
+function runtimeSettings() {
+  const c={...state.config,...settingsDraft};
+  return `<div class="settings-stack">${settingSaveBar()}<p class="settings-hint">设置更改自动保存，并暂停本次监听；核对后可重新开始监听。</p>
+  <section class="panel"><div class="panel-head"><h2>本机运行</h2></div><div class="panel-body">${switchRow('打开软件自动监听','使用已开启的答复、发货和退款功能；需要登录或验证时，完成后自动继续。','autoListenOnLaunch',c.autoListenOnLaunch)}${switchRow('开机打开工作台','登录 Windows 后打开软件；是否自动监听由上面的开关决定。','startup',settingsDraft.startup ?? state.startup)}<div class="form-footer">${button('收起到托盘','background')}</div><p class="small-note">关闭窗口默认收起到托盘。电脑关机、休眠或退出程序后无法继续处理。</p></div></section>
+  <section class="panel"><div class="panel-head"><h2>全局发送上限</h2></div><div class="panel-body"><div class="form-grid">${numberSetting(c,'maxPerMinute','每分钟最多发送消息（条）',1,120)}</div><p class="small-note">智能答复和发货消息共用此上限。各功能的开关与业务策略，请到左侧对应页面设置。</p></div></section></div>`;
+}
+function backupSettings() {
+  return `<div class="settings-stack"><section class="panel"><div class="panel-head"><h2>规则备份</h2></div><div class="panel-body"><div class="heading-actions">${button('导出规则','backup')}${button('导入规则','import')}</div><p class="small-note">备份包含规则与设置；导入后自动处理关闭。</p><button class="link-button" data-action="data-folder">打开本机数据目录 ↗</button></div></section>
+  <section class="panel"><div class="panel-head"><h2>规则迁移</h2></div><div class="panel-body"><p>通过分类文件迁移文字规则。导入一类内容，不会覆盖另一类的内容。</p>${[['replies','智能答复规则','关键词、匹配方式、答复正文、欢迎语与默认答复'],['delivery','发货规则','商品 / SKU 关键词、排除词、网盘正文与发货尾缀']].map(([scope,label,description])=>`<h3>${label}</h3><p class="small-note">${description}</p><div class="heading-actions">${button('导出'+label,'shared-export',false,`data-scope="${scope}"`)}${button('导入并预览','shared-import',false,`data-scope="${scope}"`)}</div>`).join('')}<p class="small-note">兼容旧规则备份，仅提取所选类别。图片和平台专属规则需单独处理。先暂停监听再确认导入，原规则自动备份。</p></div></section></div>`;
+}
+function connectionSettings() {
+  return `<div class="settings-stack"><section class="panel"><div class="panel-head"><h2>官方连接</h2></div><div class="panel-body"><p>${esc(state.connection.diagnostics.chat.message)}</p><div class="heading-actions">${button('检测官方连接','check-platform')}${button('打开店铺页面','open-shop')}</div><p class="small-note">实际发送、确认发货和退款结果，请在运行记录中核对平台回执。</p></div></section><section class="panel"><div class="panel-head"><h2>软件版本</h2></div><div class="panel-body">拼多多自动发货助手 v${esc(state.version)}</div></section></div>`;
+}
+function settings() {
+  const panels={runtime:runtimeSettings,backup:backupSettings,connection:connectionSettings,alerts:()=>`<div class="settings-stack">${phoneAlertPanel()}</div>`};
+  return heading('助手设置','本机运行、备份和提醒按类别管理；业务设置请到左侧对应功能。')+sectionTabs('settings',[['runtime','本机运行'],['backup','备份与迁移'],['connection','连接与版本'],['alerts','异常提醒']])+sectionPanel('settings',panels[sections.settings]());
+}
+
 function phoneAlertPanel(){
   const alerts=state.phoneAlerts;if(!alerts)return '';
   const c=phoneAlertDraft?.config||alerts.config,route=c.provider+':'+c.channel;
@@ -216,9 +251,10 @@ function rememberPhoneAlertDraft(){
 }
 async function savePhoneAlertSettings(){rememberPhoneAlertDraft();state=await call('phone-alerts:save',phoneAlertDraft);phoneAlertDraft=null;render();}
 function refunds() {
-  return `${heading('自动退款','对官方标记为需商家同意的退款申请，检测后立即提交同意。',button('预览退款流程','simulate-refund'))}
+  const c={...state.config,...settingsDraft};
+  return `${heading('自动退款','对官方标记为需商家同意的退款申请，检测后立即提交同意。',button('预览退款流程','simulate-refund'))}${settingSaveBar()}
   <div class="banner ${state.config.autoRefundEnabled?'':'amber'}">${icon('refresh')}<span>自动退款${state.config.autoRefundEnabled?'已开启':'未开启'}。申请会先停止该订单尚未执行的发货，再查询最新申请版本并提交同意；完成以平台回执为准。</span></div>
-  <section class="panel"><div class="panel-head"><h2>处理方式</h2>${button('修改开关','nav-settings')}</div><div class="panel-body"><p>不设置金额上限、不等待人工审核，也不按商品匹配规则筛选退款。</p><p>平台处理中的申请继续查询；申请撤销或结束后不再提交。网络异常时先查平台状态，防止重复操作。</p><div class="small-note">“秒退”指检测后立即提交。实际到账和平台完成时间由拼多多决定，不能保证每笔在一秒内完成。</div></div></section>
+  <section class="panel"><div class="panel-head"><h2>处理方式</h2></div><div class="panel-body">${switchRow('退款申请自动同意','检测到需商家同意的退款申请后立即提交。修改会自动保存，并暂停本次监听。','autoRefundEnabled',c.autoRefundEnabled)}<p>不设置金额上限、不等待人工审核，也不按商品匹配规则筛选退款。</p><p>平台处理中的申请继续查询；申请撤销或结束后不再提交。网络异常时先查平台状态，防止重复操作。</p><div class="small-note">“秒退”指检测后立即提交。实际到账和平台完成时间由拼多多决定，不能保证每笔在一秒内完成。</div></div></section>
   <section class="panel"><div class="panel-head"><h2>退款记录</h2></div>${jobTable(jobs().filter(job=>job.type==='refund'),true)}</section>`;
 }
 
@@ -230,7 +266,7 @@ function render() {
   const pending=state.jobs.filter(j=>!j.simulation&&['blocked','uncertain'].includes(j.status)).length;
   document.querySelector('#nav').innerHTML=navItems.map(([key,i,title])=>`<button class="nav-item ${key===page?'active':''}" data-nav="${key}">${icon(i)}<span>${title}</span>${key==='queue'&&pending?`<span class="count">${pending}</span>`:''}</button>`).join('');
   const views={dashboard,products,replies,refunds,shop,queue,records,settings}; document.querySelector('#content').innerHTML=views[page]();
-  if (page==='settings') updateSettingsStatus();
+  updateSettingsStatus();
   browserResizeObserver?.disconnect();
   if (page==='shop') { browserResizeObserver?.observe(document.querySelector('#browser-stage')); scheduleBrowserLayout(); }
   else { lastBrowserLayout=''; api.call('browser:show',{visible:false}).catch(()=>{}); }
@@ -368,7 +404,7 @@ async function action(name, target) {
   if(name==='simulate-order')return simulate('order');
   if(name==='simulate-message')return simulate('message');
   if(name==='simulate-refund')return simulate('refund');
-  if(name==='nav-settings'){page='settings';return render();}
+  if(name==='nav-settings'){page='settings';sections.settings='runtime';return render();}
   if(name==='check-platform'){
     try {await call('platform:check');await refresh(true);toast('已完成所选功能的只读连接检测');}
     catch(error){if(error.message.includes('滑块验证')){page='shop';browserKind='orders';render();}throw error;}
@@ -376,7 +412,7 @@ async function action(name, target) {
   }
   if(name==='job')return jobDetail(target.dataset.id);
   if(name==='open-shop'){page='shop';return render();}
-  if(name==='nav-replies'){page='replies';return render();}
+  if(name==='nav-replies'){page='replies';sections.replies='content';return render();}
   if(name==='running'){
     const enable=!state.config.running && !state.autoStart?.pending;
     starting=enable;updateHeader();
@@ -423,7 +459,7 @@ async function action(name, target) {
     document.querySelector('#simulation-result').innerHTML=newJobs.map(job=>`<div class="preview-result"><div class="preview-line">${label(job)}<span class="subtle">${esc(job.matchName||reason(job.reason))}</span></div>${job.reason?`<div class="small-note">${esc(reason(job.reason))}</div>`:''}<div class="content-preview">${esc(job.content||'未生成可发送内容')}</div>${job.type==='delivery' && state.config.autoConfirmShipmentEnabled?'<div class="small-note">真实运行：内容发送成功后，再向平台确认虚拟发货。</div>':''}${job.type==='refund'?'<div class="small-note">真实运行：停止待发货任务 → 查询最新申请 → 同意退款 → 核验平台状态。</div>':''}</div>`).join(''); return;
   }
   if(name==='desktop-alert-test'){await call('desktop-alert:test');return;}
-  if(name==='save-settings') {await flushSettings();if(phoneAlertDraft)await savePhoneAlertSettings();render();toast('设置已保存');return;}
+  if(name==='save-settings') {await flushSettings();render();toast('设置已保存');return;}
   if(name==='backup'){const r=await call('data:export');if(!r.cancelled)toast('规则备份已导出');return;}
   if(name==='import'){const r=await call('data:import');if(!r.cancelled){state=r;render();toast('规则已导入，自动处理保持关闭');}return;}
   if(name==='data-folder')return call('app:data-folder');
@@ -447,9 +483,16 @@ async function action(name, target) {
 }
 document.addEventListener('click',async event=>{
   const navigation=event.target.closest('[data-nav]');
-  if(navigation){
+  const section=event.target.closest('[data-section]');
+  if(navigation||section){
     const revision=++navigationRevision;
-    try {await flushSettings();if(revision!==navigationRevision)return;page=navigation.dataset.nav;filter='';closeModal();render();}catch(error){toast(error.message,true);}return;
+    try {
+      if(phoneAlertDraft)rememberPhoneAlertDraft();await flushSettings();if(revision!==navigationRevision)return;
+      if(navigation){page=navigation.dataset.nav;filter='';if(defaultSections[page])sections[page]=defaultSections[page];closeModal();}
+      else sections[page]=section.dataset.section;
+      window.scrollTo(0,0);render();
+      if(section)document.getElementById(`${page}-${sections[page]}-tab`)?.focus();
+    }catch(error){toast(error.message,true);}return;
   }
   const target=event.target.closest('[data-action]');if(!target||busy)return;
   busy=true;target.disabled=true;
@@ -458,16 +501,23 @@ document.addEventListener('click',async event=>{
 document.addEventListener('input',event=>{
   if(page==='settings'&&event.target.closest('[data-phone-alerts]')){rememberPhoneAlertDraft();return;}
   if(event.target.id==='search'){filter=event.target.value;const position=event.target.selectionStart;render();const input=document.querySelector('#search');input.focus();input.setSelectionRange(position,position);return;}
-  if(page==='settings'&&settingKeys.has(event.target.id)){
+  if(settingKeys.has(event.target.id)){
     rememberSetting(event.target);clearTimeout(settingsTimer);
     if(event.target.checkValidity())settingsTimer=setTimeout(()=>flushSettings().catch(error=>toast(error.message,true)),600);
   }
 });
 document.addEventListener('change',event=>{
   if(page==='settings'&&event.target.closest('[data-phone-alerts]')){if(event.target.id==='alert-route')document.getElementById('alert-token').value='';rememberPhoneAlertDraft();if(event.target.id==='alert-route')render();return;}
-  if(page==='settings'&&settingKeys.has(event.target.id)){rememberSetting(event.target);flushSettings().catch(error=>toast(error.message,true));}
+  if(settingKeys.has(event.target.id)){rememberSetting(event.target);flushSettings().catch(error=>toast(error.message,true));}
 });
-document.addEventListener('keydown',event=>{if(event.key==='Escape'&&modal)closeModal();});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape'&&modal)closeModal();
+  const tab=event.target.closest('[role="tab"][data-section]');
+  if(!tab||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  event.preventDefault();const tabs=[...tab.parentElement.querySelectorAll('[role="tab"]')],index=tabs.indexOf(tab);
+  const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+  tabs[next].click();
+});
 window.addEventListener('resize',()=>{lastBrowserLayout='';scheduleBrowserLayout();});
 window.addEventListener('scroll',scheduleBrowserLayout,true);
 if(api){api.onChanged(()=>refresh().catch(()=>{}));refresh(true).catch(error=>document.querySelector('#content').innerHTML=`<div class="inline-error">${esc(error.message)}</div>`);}else document.querySelector('#content').innerHTML='<div class="inline-error">请从本地桌面程序启动工作台。</div>';

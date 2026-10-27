@@ -6,6 +6,7 @@
   "main": "src/main.cjs",
   "scripts": {
     "start": "electron .",
+    "preview:ui": "electron scripts/ui-preview.cjs",
     "make-icon": "node scripts/make-icon.cjs",
     "prepare-runtime": "node node_modules/electron/install.js",
     "test": "node --test test/*.test.cjs",
