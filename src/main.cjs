@@ -22,6 +22,7 @@ const capabilitySmoke = !app.isPackaged && process.argv.includes('--capability-s
 const startupSmoke = !app.isPackaged && process.argv.includes('--startup-smoke');
 const layoutSmoke = !app.isPackaged && process.argv.includes('--layout-smoke');
 const sharedRulesSmoke = !app.isPackaged && process.argv.includes('--shared-rules-smoke');
+const liveSettingsSmoke = !app.isPackaged && process.argv.includes('--live-settings-smoke');
 const liveWireAudit = !app.isPackaged && process.argv.includes('--audit-live-wire');
 const pendingReplyAudit = !app.isPackaged && process.argv.includes('--audit-live-pending');
 const catchUpReadOnly = !app.isPackaged && process.argv.includes('--catchup-readonly');
@@ -29,7 +30,7 @@ const networkReadOnly = !app.isPackaged && process.argv.includes('--network-read
 const imageUploadAudit = !app.isPackaged && process.argv.includes('--image-upload-audit');
 const popupCleanupAudit = !app.isPackaged && process.argv.includes('--popup-cleanup-audit');
 const receiptReadOnly = !app.isPackaged && process.argv.includes('--receipt-readonly');
-const smokeMode = !app.isPackaged && (process.argv.includes('--smoke-test') || startupSmoke || layoutSmoke || capabilitySmoke || sharedRulesSmoke);
+const smokeMode = !app.isPackaged && (process.argv.includes('--smoke-test') || startupSmoke || layoutSmoke || capabilitySmoke || sharedRulesSmoke || liveSettingsSmoke);
 const platformReadOnly = !app.isPackaged && process.argv.includes('--platform-readonly');
 const workflowReadOnly = !app.isPackaged && process.argv.includes('--workflow-readonly');
 const readOnlyDiagnostic = !app.isPackaged && (process.argv.includes('--read-only-diagnostic') || platformReadOnly || workflowReadOnly || catchUpReadOnly || networkReadOnly || popupCleanupAudit || receiptReadOnly);
@@ -55,6 +56,7 @@ const seenOrders = new Map();
 const observedBuyers = new Set();
 const sessionQueue = new Set();
 let runNonce = 0;
+let writeNonce = 0;
 let startupListener, startPromise, catchUpTimer, catchUpToken = 0, catchUpCollecting = false;
 let listenIntent = false, recoveryShopId = '', connectFailures = 0;
 let networkRefresh, networkTimer, rendererOnline, networkRefreshBusy = false;
@@ -117,12 +119,30 @@ function pause(reason, { keepAutoStart = false } = {}) {
   if (!keepAutoStart) { listenIntent = false; recoveryShopId = ''; pagesToRecover.clear(); startupListener?.stop(); }
   clearTimeout(catchUpTimer); catchUpTimer = undefined; catchUpToken++; catchUpCollecting = false;
   runNonce += 1;
-  for (const view of views.values()) if (!view.webContents.isDestroyed() && allowedUrl(view.webContents.getURL())) view.webContents.executeJavaScript(`globalThis.__localDeliveryRunNonce=${JSON.stringify(runNonce)}`).catch(()=>{});
+  invalidatePendingWrites();
   if (engine?.snapshot().config.running) engine.setRunning(false);
   if (blocker && powerSaveBlocker.isStarted(blocker)) powerSaveBlocker.stop(blocker);
   blocker = undefined;
   if (reason) note(reason);
   changed();
+}
+function invalidatePendingWrites(){
+  writeNonce++;
+  for(const view of views.values())if(!view.webContents.isDestroyed()&&allowedUrl(view.webContents.getURL()))view.webContents.executeJavaScript(`globalThis.__localDeliveryRunNonce=${JSON.stringify(writeNonce)}`).catch(()=>{});
+}
+function applyLiveConfig(value,{startup}={}){
+  const previous=engine.snapshot().config;
+  const config=validateConfig({...value,running:previous.running});
+  if(startup!==undefined&&typeof startup!=='boolean')throw Error('开机启动设置格式不正确');
+  if(typeof startup==='boolean'&&startup!==app.getLoginItemSettings().openAtLogin)app.setLoginItemSettings({openAtLogin:startup});
+  if(JSON.stringify(previous)!==JSON.stringify(config)){
+    engine.updateConfig(config);invalidatePendingWrites();
+    const deliveryKeys=['products','suffix','deliveryFallback','deliveryFallbackEnabled','deliveryFallbackImages','separateLinksEnabled','autoDeliveryEnabled','autoConfirmShipmentEnabled'];
+    if(deliveryKeys.some(key=>JSON.stringify(previous[key])!==JSON.stringify(config[key])))seenOrders.clear();
+    const missingLegacyReply=engine.snapshot().jobs.some(job=>job.type==='reply'&&job.status==='cancelled'&&job.reason==='rules_changed'&&job.updatedAt>=Date.now()-1000);
+    if(config.running&&config.autoReplyEnabled&&(!previous.autoReplyEnabled||missingLegacyReply))void maintainPendingReplies(true).catch(error=>note('设置已保存，待回复检查稍后重试：'+error.message));
+  }
+  changed();return snapshot();
 }
 const needsPerson = message => /滑块|安全验证|扫码|登录已过期|请先.*登录|账户.*别处/.test(message);
 function recoverConnection(kind = 'chat', message = '官方连接中断', { reload = true } = {}) {
@@ -277,7 +297,6 @@ function ensureView(kind) {
   if (!['chat', 'orders'].includes(kind)) throw new Error('未知商家页面');
   if (views.has(kind)) return views.get(kind);
   if (smokeMode) {
-    if (!layoutSmoke) throw new Error('隔离测试禁止打开真实商家页面');
     const fixture=require('../scripts/layout-smoke.cjs').createView(kind);views.set(kind,fixture);return fixture;
   }
   const view = new WebContentsView({ webPreferences: { partition: 'persist:pdd-workbench-main', preload: kind==='chat'?path.join(__dirname,'platform','pdd-socket-preload.cjs'):undefined, nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, backgroundThrottling: false } });
@@ -469,7 +488,7 @@ function setBounds(bounds) {
 }
 async function transport(job) {
   if (readOnlyDiagnostic || imageUploadAudit) return {status:'rejected',reason:'联调已锁定所有平台业务写入'};
-  const nonce=runNonce;
+  const nonce=runNonce,writeVersion=writeNonce;
   if(capabilityRecovery.excludedTypes({chatReady:bridgeAvailable}).includes(job.type))return {status:'deferred',reason:'所需官方功能正在恢复，任务已保留等待重试'};
   let current;
   try { current=await officialChat(); } catch(error) { return {status:'deferred',reason:error.message}; }
@@ -523,16 +542,16 @@ async function transport(job) {
       if (!match.deliverable || match.productId!==job.productId || match.fallback!==!!job.deliveryFallback || match.content!==job.content) return {status:'skipped',reason:'商品名称、SKU 或发货内容已变化，请重新核对'};
     }
   }
-  if (!engine.snapshot().config.running || nonce!==runNonce || capabilityRecovery.excludedTypes({chatReady:bridgeAvailable}).includes(job.type)) return {status:'deferred',reason:'暂停或连接变化，尚未提交操作'};
+  if (!engine.snapshot().config.running || nonce!==runNonce || writeVersion!==writeNonce || capabilityRecovery.excludedTypes({chatReady:bridgeAvailable}).includes(job.type)) return {status:'deferred',reason:'设置或连接已变化，尚未提交操作，将按最新状态重试'};
   const kind=job.type==='shipment'?'orders':'chat';
-  if (!smokeMode) try { await ensureView(kind).webContents.executeJavaScript(`globalThis.__localDeliveryRunNonce=${JSON.stringify(nonce)}`); } catch(error) {return {status:'deferred',reason:error.message};}
-  if (!engine.snapshot().config.running || nonce!==runNonce || !bridgeAvailable) return {status:'deferred',reason:'自动处理已暂停，尚未提交操作'};
+  if (!smokeMode) try { await ensureView(kind).webContents.executeJavaScript(`globalThis.__localDeliveryRunNonce=${JSON.stringify(writeVersion)}`); } catch(error) {return {status:'deferred',reason:error.message};}
+  if (!engine.snapshot().config.running || nonce!==runNonce || writeVersion!==writeNonce || !bridgeAvailable) return {status:'deferred',reason:'设置或连接已变化，尚未提交操作'};
   let imagePreview;
   if (job.partKind==='image') {
     const file=path.join(dataDir,'assets',job.image.id+(job.image.mime==='image/png'?'.png':'.jpg'));
     if (fs.existsSync(file)) imagePreview=nativeImage.createFromPath(file).resize({width:Math.min(300,job.image.width)}).toDataURL();
   }
-  return bridge(kind,job.type==='shipment'?'ship':job.type==='refund'?'refund':'send',{job,imagePreview,allowWrite:true,runNonce:nonce});
+  return bridge(kind,job.type==='shipment'?'ship':job.type==='refund'?'refund':'send',{job,imagePreview,allowWrite:true,runNonce:writeVersion});
 }
 function recordCapabilityFailure(kind,error) {
   if(/店铺.*变化|店铺.*不一致/.test(error.message)) {pause('店铺变化，已暂停自动处理。');return;}
@@ -682,8 +701,8 @@ async function pump() {
   dispatching=true;
   try {
     const job=engine.nextJob({excludeTypes:capabilityRecovery.excludedTypes({chatReady:bridgeAvailable,collectingReplies:catchUpCollecting})});
-    if (job) { await engine.dispatch(job.id); changed(); }
-  } catch(error) { pause('自动处理暂停：'+error.message); }
+    if (job) { const result=await engine.dispatch(job.id);if(result.type==='delivery'&&result.status==='cancelled'&&result.reason==='rules_changed')seenOrders.delete(result.orderId);changed(); }
+  } catch(error) { if(smokeMode)console.error(error);pause('自动处理暂停：'+error.message); }
   finally {dispatching=false;}
 }
 
@@ -746,7 +765,6 @@ function startListening() {
     if (engine.snapshot().config.running) return snapshot();
     if (readOnlyDiagnostic && !workflowReadOnly && !catchUpReadOnly && !networkReadOnly) throw new Error('当前为只读联调，请先完成取数与回执验证');
     const config = engine.snapshot().config;
-    if (!config.autoReplyEnabled && !config.autoDeliveryEnabled && !config.autoRefundEnabled) throw new Error('请先在设置中选择要启用的自动答复、自动发货或自动退款');
     listenIntent = true;
     const checkingNonce = runNonce;
     await recoverPages();
@@ -765,7 +783,7 @@ function startListening() {
     blocker=powerSaveBlocker.start('prevent-app-suspension');
     catchUpState = {phase:'disabled',scanned:0,candidates:0,created:0,skipped:0};
     note('已启动所选功能，正在监听新消息，并扫描官方待发货订单与退款申请。');
-    if (config.autoReplyEnabled && config.catchUpUnrepliedEnabled) void scanUnreplied(startingNonce);
+    if (engine.snapshot().config.autoReplyEnabled) void scanUnreplied(startingNonce);
     void poll();
     return snapshot();
   })().catch(error=>{
@@ -826,16 +844,13 @@ function registerIpc() {
     const ratio=Math.min(1,300/size.width,300/size.height);
     return {image,preview:decoded.resize({width:Math.max(1,Math.round(size.width*ratio))}).toDataURL()};
   });
-  handle('config:update', value => { pause(); engine.updateConfig({ ...value, running: false }); changed(); return snapshot(); });
+  handle('config:update', value => applyLiveConfig(value));
   handle('settings:update', value => {
     const allowed=new Set([...Object.keys(defaults).filter(key=>!['running','products','replyRules'].includes(key)),'startup']);
     if (!value || typeof value!=='object' || Array.isArray(value) || Object.keys(value).some(key=>!allowed.has(key))) throw new Error('设置更新格式不正确');
     const {startup,...patch}=value;
     if (startup!==undefined && typeof startup!=='boolean') throw new Error('开机启动设置格式不正确');
-    const config=validateConfig({...engine.snapshot().config,...patch,running:false});
-    pause(); engine.updateConfig(config);
-    if (typeof startup==='boolean' && startup!==app.getLoginItemSettings().openAtLogin) app.setLoginItemSettings({openAtLogin:startup});
-    changed();return snapshot();
+    return applyLiveConfig({...engine.snapshot().config,...patch},{startup});
   });
   handle('running:set', async enabled => {
     if (!enabled) { pause('已手动暂停监听。'); return snapshot(); }
@@ -876,8 +891,10 @@ function registerIpc() {
     return { path: result.filePath };
   });
   handle('data:import', async () => {
+    if(engine.snapshot().config.running||dispatching)throw Error('导入备份前请先手动暂停监听，并等待当前平台操作完成');
     const result = await dialog.showOpenDialog(window, { title: '导入规则备份', properties: ['openFile'], filters: [{ name: 'JSON 规则备份', extensions: ['json'] }] });
     if (result.canceled) return { cancelled: true };
+    if(engine.snapshot().config.running||dispatching)throw Error('导入备份前请先手动暂停监听，并等待当前平台操作完成');
     const file = result.filePaths[0]; if (fs.statSync(file).size > 8 * 1024 * 1024) throw new Error('规则文件过大');
     const value = readJson(file);
     if (value?.format !== 'link-workbench-rules' || ![1,2].includes(value.version)) throw new Error('不是本软件的规则备份文件');
@@ -969,7 +986,7 @@ else {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(uiUrl)) event.preventDefault(); });
     registerIpc(); window.loadURL(uiUrl);
-    if (smoke) window.webContents.once('did-finish-load', () => require(sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, phoneAlerts, desktopAlert, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
+    if (smoke) window.webContents.once('did-finish-load', () => require(liveSettingsSmoke?'../scripts/live-settings-smoke.cjs':sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, phoneAlerts, desktopAlert, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
     if (!smoke && !readOnlyDiagnostic && !liveWireAudit && !pendingReplyAudit && !imageUploadAudit && !process.argv.includes('--start-paused')) window.webContents.once('did-finish-load', () => startupListener.arm(engine.snapshot().config));
     if (imageUploadAudit) window.webContents.once('did-finish-load',()=>require('../scripts/image-upload-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('图片检查失败：'+error.message);app.exit(1);}));
     if (popupCleanupAudit) window.webContents.once('did-finish-load',()=>require('../scripts/popup-cleanup-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('弹窗检查失败：'+error.message);app.exit(1);}));

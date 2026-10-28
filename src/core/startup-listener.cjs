@@ -12,9 +12,6 @@ class StartupListener {
   arm(config, { recovery = false } = {}) {
     this.stop('idle');
     if (!config.autoListenOnLaunch && !recovery) return;
-    if (!config.autoReplyEnabled && !config.autoDeliveryEnabled && !config.autoRefundEnabled) {
-      this.publish({ phase: 'disabled', message: '请先开启要使用的自动处理功能' }); return;
-    }
     this.active = true; this.attempt = 0; this.recovery = recovery;
     void this.run(this.generation);
   }

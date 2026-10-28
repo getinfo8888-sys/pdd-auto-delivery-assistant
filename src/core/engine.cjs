@@ -14,7 +14,7 @@ const DELIVERY_RETRY_DELAYS = [5000, 15000, 30000, 60000, 120000, 300000];
 const defaults = Object.freeze({
   running: false,
   autoListenOnLaunch: false,
-  catchUpUnrepliedEnabled: false,
+  catchUpUnrepliedEnabled: true,
   autoReplyEnabled: false,
   autoDeliveryEnabled: false,
   deliveryFallbackEnabled: false,
@@ -24,7 +24,7 @@ const defaults = Object.freeze({
   greetingEnabled: true,
   manualInterventionEnabled: true,
   replySuffixEnabled: false,
-  replyBodySpaceRetryEnabled: false,
+  replyBodySpaceRetryEnabled: true,
   replySuffixMode: 'invisible',
   separateLinksEnabled: false,
   greetingImages: Object.freeze([]),
@@ -195,6 +195,9 @@ function validateConfig(input) {
   for (const key of ['running', 'autoListenOnLaunch', 'catchUpUnrepliedEnabled', 'autoReplyEnabled', 'autoDeliveryEnabled', 'deliveryFallbackEnabled', 'autoConfirmShipmentEnabled', 'autoRefundEnabled', 'greetingEnabled', 'manualInterventionEnabled', 'replySuffixEnabled', 'replyBodySpaceRetryEnabled', 'separateLinksEnabled']) {
     config[key] = booleanField(input[key], key, defaults[key]);
   }
+  // Retain the legacy fields for file compatibility. Recovery is an invariant
+  // of enabled automatic replies, rather than another user-managed feature.
+  config.catchUpUnrepliedEnabled = config.replyBodySpaceRetryEnabled = true;
   config.replySuffixMode=enumField(input.replySuffixMode,'答复末尾内容',['invisible','time'],defaults.replySuffixMode);
   for (const key of ['greeting', 'fallback', 'suffix', 'deliveryFallback']) {
     config[key] = textField(input[key], key, { fallback: defaults[key] });
@@ -316,6 +319,8 @@ function validateState(value) {
     if(job.wireContent!==undefined && (job.type!=='reply' || !isValidReplyPayload(job.content, job.wireContent, job.replyBodySpaceOffsets)))throw new TypeError('答复发送正文已损坏');
     if(job.wireContentSha256!==undefined && (typeof job.wireContent!=='string' || job.wireContentSha256!==createHash('sha256').update(job.wireContent).digest('hex')))throw new TypeError('答复发送正文校验已损坏');
     if (job.sourceSentAt !== undefined && job.sourceSentAt !== null && (!Number.isFinite(job.sourceSentAt) || job.sourceSentAt <= 0)) throw new TypeError('答复来源时间已损坏');
+    if (job.sourceText !== undefined && (job.type !== 'reply' || typeof job.sourceText !== 'string' || job.sourceText.length > 100000)) throw new TypeError('答复来源正文已损坏');
+    if (job.settingsRefreshPending !== undefined && typeof job.settingsRefreshPending !== 'boolean') throw new TypeError('任务设置刷新标记已损坏');
     if (job.needsReplyVerification !== undefined && typeof job.needsReplyVerification !== 'boolean') throw new TypeError('答复核验标记已损坏');
     if (job.reviewedAt !== undefined && (!Number.isFinite(job.reviewedAt) || job.reviewedAt < 0)) throw new TypeError('答复复核时间已损坏');
     for (const field of ['recoveryJobId', 'reviewedCancellationJobId', 'retryRejectedJobId', 'retryJobId', 'officialAutoReplyRecoveryJobId', 'platformHintRecoveryJobId']) if (job[field] !== undefined && (typeof job[field] !== 'string' || !job[field] || job[field].length > 128)) throw new TypeError('答复复核任务关联已损坏');
@@ -414,7 +419,7 @@ class Engine {
     try {
       exists = fs.existsSync(this.filePath);
       const raw = exists ? JSON.parse(fs.readFileSync(this.filePath, 'utf8')) : null;
-      migrated = raw?.version === 1;
+      migrated = raw?.version === 1 || !!raw?.config && (raw.config.catchUpUnrepliedEnabled !== true || raw.config.replyBodySpaceRetryEnabled !== true);
       this._state = exists ? validateState(raw) : newState();
     } catch (error) {
       throw new Error(`无法读取工作台数据，原文件已保留：${this.filePath}。${error.message}`, { cause: error });
@@ -508,11 +513,13 @@ class Engine {
   updateConfig(fullConfig) {
     const config = validateConfig(fullConfig);
     this._mutate(() => {
-      const replyKeys = ['replyRules','greeting','fallback','greetingEnabled','replySuffixEnabled','replySuffixMode','separateLinksEnabled','greetingImages','fallbackImages'];
-      const replyChanged = replyKeys.some(key => JSON.stringify(this._state.config[key]) !== JSON.stringify(config[key]));
+      const previous = this._state.config;
+      const replyKeys = ['replyRules','greeting','fallback','greetingEnabled','replySuffixEnabled','replySuffixMode','separateLinksEnabled','greetingImages','fallbackImages','cooldownSeconds','firstReplyDelaySeconds','replyDelaySeconds'];
+      const replyChanged = replyKeys.some(key => JSON.stringify(previous[key]) !== JSON.stringify(config[key]));
       this._state.config = config;
-      if (replyChanged) for (const job of this._state.jobs) if (!job.simulation && job.type === 'reply' && job.status === 'queued' && !job.parentJobId) {
-        job.status='cancelled';job.reason='rules_changed';job.updatedAt=this._time();this._state.counts.cancelled++;
+      for(const job of this._state.jobs)if(!job.simulation&&!job.parentJobId){
+        if(job.status==='sending')job.settingsRefreshPending=true;
+        else if(replyChanged&&job.type==='reply'&&job.status==='queued')this._refreshQueuedReply(job,previous,config);
       }
       for (const job of this._state.jobs) if (!job.simulation && job.status==='queued' && job.type==='delivery' && !job.parentJobId) {
         const entry=this._state.ledger.orders[JSON.stringify([job.shopId,job.orderId,job.itemId])];
@@ -525,6 +532,30 @@ class Engine {
       this._log('info', '已保存本地规则设置', { code: 'config_updated' });
     });
     return clone(config);
+  }
+
+  _refreshQueuedReply(job, previous, config) {
+    const contentKeys=['replyRules','greeting','fallback','greetingEnabled','greetingImages','fallbackImages','separateLinksEnabled'];
+    const contentChanged=contentKeys.some(key=>JSON.stringify(previous?.[key])!==JSON.stringify(config[key]));
+    const formattingChanged=!previous||previous.replySuffixEnabled!==config.replySuffixEnabled||previous.replySuffixMode!==config.replySuffixMode;
+    let plan;
+    if(contentChanged){
+      if(job.strategy==='greeting')plan=config.greetingEnabled&&config.greeting?{content:config.greeting,matchName:'首次欢迎语',strategy:'greeting'}:null;
+      else if(typeof job.sourceText==='string')plan=planReplies({...job,text:job.sourceText},{...config,greetingEnabled:false},{now:this._time(),previousAskAt:this._time(),random:()=>0})[0];
+      else if(job.strategy==='fallback'&&previous&&JSON.stringify(previous.replyRules)===JSON.stringify(config.replyRules))plan=config.fallback?{content:config.fallback,matchName:'默认回复',strategy:'fallback'}:null;
+      if(!plan){job.status='cancelled';job.reason='rules_changed';job.updatedAt=this._time();this._state.counts.cancelled++;return;}
+      job.content=plan.content;job.matchName=plan.matchName;job.strategy=plan.strategy;
+      if(plan.replyRuleId)job.replyRuleId=plan.replyRuleId;else delete job.replyRuleId;
+      const images=job.replyRuleId?config.replyRules.find(row=>row.id===job.replyRuleId)?.images:job.strategy==='greeting'?config.greetingImages:config.fallbackImages;
+      job.messageParts=messageParts(job.content,images||[],config.separateLinksEnabled);
+      if(typeof job.retryOriginalContent==='string')job.retryOriginalContent=job.content;
+    }
+    if(contentChanged||formattingChanged)clearReplyWire(job);
+    const delay=job.strategy==='greeting'?config.firstReplyDelaySeconds:(config.replyRules.find(row=>row.id===job.replyRuleId)?.delaySeconds??config.replyDelaySeconds);
+    job.replyCooldownUntil=this._replyCooldownUntil(job,job.content);
+    job.notBefore=Math.max(job.createdAt+delay*1000,job.replyCooldownUntil);
+    job.needsReplyVerification=true;job.updatedAt=this._time();
+    this._log('info','待发答复已应用最新设置，发送前继续核验会话',{jobId:job.id,code:'reply_settings_refreshed'});
   }
 
   setRunning(running) {
@@ -559,6 +590,7 @@ class Engine {
     for (const key of ['orderId', 'itemId', 'title', 'sku', 'messageId', 'refundId', 'refundVersion']) if (event[key] !== undefined) job[key] = event[key];
     if (type === 'reply') {
       job.sourceSentAt = event.sentAt ?? null;
+      if(typeof event.text==='string')job.sourceText=event.text;
       if (!simulation) job.needsReplyVerification = true;
     }
     if (productId) job.productId = productId;
@@ -1117,7 +1149,14 @@ class Engine {
         job.updatedAt = this._time();
         if (!reason && typeof response?.messageId === 'string') job.sentMessageId = response.messageId.slice(0, 1024);
         if (!reason) { delete job.detail; this._countSent(job); }
-        this._log(reason ? 'warning' : 'info', reason ? reasonText[reason] || '会话已有回复或出现新消息，已取消旧补答' : '已获得发送成功确认', { jobId: job.id, code: reason || 'sent' });
+        if(job.settingsRefreshPending&&job.status==='queued'&&job.type==='reply'&&!job.parentJobId)this._refreshQueuedReply(job,null,this._state.config);
+        if(job.settingsRefreshPending&&job.status==='queued'&&job.type==='delivery'&&!job.parentJobId){
+          const entry=this._state.ledger.orders[JSON.stringify([job.shopId,job.orderId,job.itemId])],match=entry&&planDelivery(entry.event,this._state.config);
+          if(!match?.deliverable||match.productId!==job.productId||match.fallback!==!!job.deliveryFallback||match.content!==job.content||JSON.stringify(job.messageParts||[])!==JSON.stringify(messageParts(match.content,match.images,this._state.config.separateLinksEnabled))){job.status='cancelled';job.reason='rules_changed';this._state.counts.cancelled++;if(entry&&!entry.delivered)entry.claimed=false;}
+        }
+        delete job.settingsRefreshPending;
+        const finalReason=job.reason;
+        this._log(finalReason ? 'warning' : 'info', finalReason ? reasonText[finalReason] || '任务已按最新状态处理' : '已获得发送成功确认', { jobId: job.id, code: finalReason || 'sent' });
       });
     } catch (error) {
       // The disk still says sending and will recover as uncertain on next start.

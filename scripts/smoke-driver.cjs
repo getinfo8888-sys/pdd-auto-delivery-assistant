@@ -14,12 +14,13 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
     await evalUi(`document.querySelector(${JSON.stringify(selector)}).click()`);await wait(250);
   };
   const value = async(selector,text) => {if(/^#[a-zA-Z]/.test(selector))await openSetting(selector.slice(1));return evalUi(`document.querySelector(${JSON.stringify(selector)}).value=${JSON.stringify(text)}`);};
-  const fieldRoutes={autoReplyEnabled:['replies','strategy'],replySuffixEnabled:['replies','strategy'],replySuffixMode:['replies','strategy'],cooldownSeconds:['replies','strategy'],replyDelaySeconds:['replies','strategy'],replyBodySpaceRetryEnabled:['replies','recovery'],autoDeliveryEnabled:['products','delivery'],autoConfirmShipmentEnabled:['products','delivery'],suffix:['products','delivery'],separateLinksEnabled:['products','delivery'],autoRefundEnabled:['refunds'],maxPerMinute:['settings','runtime']};
+  const fieldRoutes={autoReplyEnabled:['replies','strategy'],replySuffixEnabled:['replies','strategy'],replySuffixMode:['replies','strategy'],cooldownSeconds:['replies','strategy'],replyDelaySeconds:['replies','strategy'],autoDeliveryEnabled:['products','delivery'],autoConfirmShipmentEnabled:['products','delivery'],suffix:['products','delivery'],separateLinksEnabled:['products','delivery'],autoRefundEnabled:['refunds'],maxPerMinute:['settings','runtime']};
   const openSetting=async key=>{const route=fieldRoutes[key];if(!route||await evalUi(`!!document.getElementById(${JSON.stringify(key)})`))return;await click(`[data-nav="${route[0]}"]`);if(route[1])await click(`[data-section="${route[1]}"]`);};
   const toggleCapabilities=async()=>{for(const key of ['autoDeliveryEnabled','autoRefundEnabled','autoReplyEnabled'])await click('#'+key);};
   const until=async(check,label)=>{const deadline=Date.now()+9000;while(Date.now()<deadline){if(await check())return;await wait(100);}throw Error('Timeout: '+label);};
   await wait(400);
   await evalUi('refresh(true)');
+  assert.equal(await evalUi('page'),'shop');assert.equal(await evalUi('browserKind'),'chat');await click('[data-nav="dashboard"]');
   assert.equal(await evalUi(`document.querySelector('#content h1').textContent.includes('把发货交给规则')`),true);
   fs.writeFileSync(path.join(out,'dashboard.png'), (await window.webContents.capturePage()).toPNG());
   await click('[data-nav="products"]'); await click('[data-action="add-product"]');
@@ -67,9 +68,9 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   await evalUi(`document.querySelector('#replySuffixMode').dispatchEvent(new Event('change',{bubbles:true}));void 0;`);
   await click('[data-nav="products"]');await click('[data-nav="settings"]');
   assert.equal(engine.snapshot().config.replySuffixEnabled,true);assert.equal(engine.snapshot().config.replySuffixMode,'invisible');
-  await click('#replyBodySpaceRetryEnabled');await click('[data-nav="products"]');await click('[data-nav="settings"]');
-  await openSetting('replyBodySpaceRetryEnabled');
-  assert.equal(engine.snapshot().config.replyBodySpaceRetryEnabled,true);assert.equal(await evalUi(`document.getElementById('replyBodySpaceRetryEnabled').checked`),true);
+  assert.equal(engine.snapshot().config.replyBodySpaceRetryEnabled,true);assert.equal(engine.snapshot().config.catchUpUnrepliedEnabled,true);
+  await click('[data-nav="replies"]');await click('[data-section="strategy"]');
+  assert.equal(await evalUi(`!!document.querySelector('#replyBodySpaceRetryEnabled,#catchUpUnrepliedEnabled,[data-section="recovery"],[data-action="save-settings"]')`),false);
   fs.writeFileSync(path.join(out,'settings.png'), (await window.webContents.capturePage()).toPNG());
   await value('#suffix','测试统一尾缀');await value('#cooldownSeconds','73');
   await evalUi(`document.getElementById('cooldownSeconds').dispatchEvent(new Event('input',{bubbles:true}));void 0;`);
@@ -113,23 +114,24 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   await toggleCapabilities();
   await click('[data-nav="products"]');await click('[data-nav="settings"]');
   for(const key of ['autoReplyEnabled','autoDeliveryEnabled','autoRefundEnabled'])assert.equal(engine.snapshot().config[key],false);
+  await click('[data-action="running"]');await until(()=>engine.snapshot().config.running,'passive listening with all features off');
   await click('[data-action="running"]');assert.equal(engine.snapshot().config.running,false);
-  assert.match(await evalUi(`document.querySelector('#toast').textContent`),/请先在设置中选择/);
   await toggleCapabilities();
   await evalUi(`document.getElementById('autoReplyEnabled').click();document.getElementById('autoReplyEnabled').click();document.querySelector('[data-action="running"]').click();void 0;`);
   await until(()=>engine.snapshot().config.running,'immediate start waits for auto-save');
   await click('[data-action="running"]');
   await until(()=>!engine.snapshot().config.running,'pause after immediate start');
-  // A settings change while the connection check is pending cancels that start.
+  // Saving a feature switch during connection must not cancel the listener.
   const fixtureBridge=platform.bridge;let releaseHealth,healthEntered=false;
   const healthGate=new Promise(resolve=>{releaseHealth=resolve;});
   platform.bridge=async(kind,action,payload)=>{if(kind==='chat'&&action==='health'){healthEntered=true;await healthGate;}return fixtureBridge(kind,action,payload);};
   await click('[data-action="running"]');await until(()=>healthEntered,'delayed connection check');
   await click('#autoReplyEnabled');await until(()=>!engine.snapshot().config.autoReplyEnabled,'settings changed during start');
   releaseHealth();
-  await until(()=>evalUi(`document.querySelector('#toast').textContent.includes('连接期间设置已修改')`),'pending start cancelled');
-  assert.equal(engine.snapshot().config.running,false);
+  await until(()=>engine.snapshot().config.running,'connection continues after live setting change');
+  await until(()=>evalUi('!busy'),'start action completed');
   platform.bridge=fixtureBridge;
+  await click('#autoReplyEnabled');assert.equal(engine.snapshot().config.running,true);await click('[data-action="running"]');
   platform.bridge=(kind,action,payload)=>kind==='orders'&&action==='waiting'?new Promise(()=>{}):fixtureBridge(kind,action,payload);
   await click('[data-action="running"]');
   await until(()=>evalUi(`state.connection.bridge.orders.reason?.includes('订单读取超时')`),'unresponsive order read is reported separately');
@@ -189,7 +191,7 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
     if(action==='attachment-check')return {ready:true,status:'not_found'};
     return fixtureBridge(kind,action,payload);
   };
-  await click('[data-action="running"]');
+  assert.equal(engine.snapshot().config.running,true,'rule and image settings keep listening active');
   await until(()=>engine.snapshot().jobs.some(row=>row.orderId===mediaOrder.orderId&&row.attachmentRetryCount===1),'image failure remains queued');
   assert.equal(platform.data.orders.get(mediaOrder.orderId).shipped,false);
   await until(()=>platform.data.orders.get(mediaOrder.orderId).shipped,'text URL and image complete before shipping');
@@ -231,7 +233,7 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   phoneAlerts.observe({wanted:true,online:true,healthy:true,failures:[]});alertClock+=60000;phoneAlerts.observe({wanted:true,online:true,healthy:true,failures:[]});phoneAlerts.monitor.now=realNow;
   assert.equal(desktopAlert.notice,null);
   const beforeTabNavigation=engine.snapshot().config;
-  for(const [owner,keys]of [['products',['list','delivery']],['replies',['content','strategy','recovery']],['settings',['runtime','backup','connection','alerts']]]){
+  for(const [owner,keys]of [['products',['list','delivery']],['replies',['content','strategy']],['settings',['runtime','backup','connection','alerts']]]){
     await click(`[data-nav="${owner}"]`);
     for(const key of keys){await click(`[data-section="${key}"]`);assert.equal(await evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dataset.section`),key);}
   }
@@ -241,8 +243,8 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   await click('[data-section="content"]');assert.equal(await evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dataset.section`),'strategy');assert.equal(engine.snapshot().config.replyDelaySeconds,originalDelay);
   await value('#replyDelaySeconds',String(originalDelay));await click('[data-section="content"]');
   await evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));void 0;`);
-  await until(()=>evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dataset.section==='recovery'`),'keyboard tab navigation');
-  await click('[data-action="running"]');await until(()=>engine.snapshot().config.running,'resume after editing isolated test settings');
+  await until(()=>evalUi(`document.querySelector('[role="tab"][aria-selected="true"]').dataset.section==='strategy'`),'keyboard tab navigation');
+  assert.equal(engine.snapshot().config.running,true,'editing and validating delays preserves active listening');
   await click('[data-nav="settings"]');
   assert.equal(await evalUi(`!!document.querySelector('[data-phone-alerts]')`),false);
   await click('[data-section="alerts"]');
@@ -271,11 +273,12 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   await previewPopup.webContents.executeJavaScript("document.getElementById('open').click()");await until(()=>previewPopup.isDestroyed(),'open assistant from alert');
   const nativeTrayWindowVisibilityVerified=!window.webContents.isOffscreen();
   trayMenu.items.find(item=>item.label==='打开工作台').click();await wait(200);if(nativeTrayWindowVisibilityVerified)assert.equal(window.isVisible(),true);
+  const liveSettings=await require('./live-settings-smoke.cjs').run({window,engine,platform});
   window.close();await wait(100);assert.equal(window.isVisible(),false);assert.equal(window.isDestroyed(),false);assert.equal(engine.snapshot().config.running,true);
   trayMenu.items.find(item=>item.label==='打开工作台').click();await wait(200);if(nativeTrayWindowVisibilityVerified)assert.equal(window.isVisible(),true);
-  const results={ok:true,assertions:['dashboard rendered','SKU-only rule saved through UI/IPC','SKU-only delivery preview includes suffix','simulation does not send','welcome and keyword previews are separate','refund preview does not operate platform','switches auto-save across navigation','text and number settings save on navigation without Save','reply suffix settings auto-save across navigation','reply payload adds invisible suffix and keeps URL-tail answers intact','sent reply details show suffix code points and verified official arguments','start waits for saved switches','poll to reply, delivery, shipment and refund with isolated platform','delivery confirmed before shipment','rapid toggles retain final values','empty capability selection cannot start','pause preserves switches on disk','settings changed during connection cancel the pending start','unresponsive order reads report a separate error while healthy listening starts'],fixtureActions:platform.data.actions.map(row=>row.action),actualPlatformWrites:0,adapter,dataDir};
+  const results={ok:true,assertions:['default page is the shop customer-service workspace','dashboard rendered','SKU-only rule saved through UI/IPC','SKU-only delivery preview includes suffix','simulation does not send','welcome and keyword previews are separate','refund preview does not operate platform','switches auto-save across navigation','text and number settings save on navigation without Save','reply suffix settings auto-save across navigation','reply payload adds invisible suffix and keeps URL-tail answers intact','sent reply details show suffix code points and verified official arguments','start waits for saved switches','poll to reply, delivery, shipment and refund with isolated platform','delivery confirmed before shipment','rapid toggles retain final values','all automatic functions can be off while monitoring remains on','pause preserves switches on disk','settings changed during connection preserve the pending start','unresponsive order reads report a separate error while healthy listening starts'],fixtureActions:platform.data.actions.map(row=>row.action),actualPlatformWrites:0,adapter,dataDir};
   results.assertions.push('platform notice cards do not cancel real replies','confirmed own welcome permits the same-source keyword follow-up');
-  results.assertions.push('body-space retry preference auto-saves across navigation');
+  results.assertions.push('recovery is built in without extra switches or a Save-now button');
   results.assertions.push('unmatched delivery default is configured through UI and IPC','unmatched title and SKU preview the default without sending','confirmed default delivery precedes automatic shipment');
   results.assertions.push('window Close hides to the tray without pausing listening','hidden workbench continues discovering and delivering orders','delivery rejection retries automatically with a visible deadline','tray Open restores the existing window');
   results.assertions.push('offline desktop alert works with no phone key and uses screen work area','dismissing an alert does not pause recovery or reopen the same incident','desktop popup opens the existing assistant and rejects another sender');
@@ -283,6 +286,7 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   results.assertions.push('a platform notice cannot hide an offline pending inquiry from maintenance','notice-covered inquiry uses configured fallback and requires a receipt','a second scan does not duplicate a notice-covered reply');
   results.assertions.push('phone reminder settings persist without pausing business','phone credentials are never echoed in snapshots or input fields','manual phone test uses only the isolated notification service','phone monitor observes the real application connection state');
   results.assertions.push('helper settings default to local runtime and place alerts last','reply, delivery and refund controls save from their own pages','tab switches preserve settings and share the existing link preference');
+  results.liveSettings=liveSettings;
   results.assertions.push('browsing every settings category leaves active listening unchanged','invalid delay prevents leaving its tab without changing persisted settings','arrow/home/end tab navigation is accessible','unsaved alert drafts survive switching tabs without saving or pausing');
   results.fixturePhoneNotices=phoneNotices.length;
   results.assertions.push('local image selection saves metadata without sending to a buyer','image editor restores saved attachments','standalone URL setting auto-saves across navigation','text then exact URL then image precede shipment','image rejection persists and retries without resending previous parts','part receipts are visible in processing details');

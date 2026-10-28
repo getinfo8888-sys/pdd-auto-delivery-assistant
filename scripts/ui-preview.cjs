@@ -14,7 +14,7 @@ app.setPath('userData',path.join(directory,'browser-data'));
 if(!app.requestSingleInstanceLock())app.quit();
 else {
   let window,engine,revision=0,startup=false,alertConfig={...alertDefaults};
-  const snapshot=()=>({...engine.snapshot(),revision,readOnly:true,version:require('../package.json').version+' · 界面测试版',startup,dataDir:directory,
+  const snapshot=()=>({...engine.snapshot(),revision,readOnly:true,preview:true,version:require('../package.json').version+' · 界面测试版',startup,dataDir:directory,
     autoStart:{phase:'idle',pending:false},catchUp:{phase:'disabled'},
     phoneAlerts:{config:alertConfig,credentials:{serverchan:false,pushplus:false},encryptionAvailable:false,monitor:{incident:null,lastNotification:null},test:null},
     connection:{profile:defaultProfile(),diagnostics:{chat:{ready:false,message:'界面测试版使用本地虚构数据，正式助手继续接待。'},notes:[]},bridge:{chat:{ready:false},orders:{ready:false},refunds:{ready:false}},urls:{},pages:{},network:{phase:'online'},coverage:'界面预览不连接真实店铺。'}});
@@ -30,13 +30,14 @@ else {
     window.webContents.on('will-navigate',event=>event.preventDefault());
     const handle=(name,action)=>ipcMain.handle(name,(event,value)=>{if(event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame)throw Error('无效的预览请求');return action(value);});
     handle('snapshot',snapshot);
+    handle('running:set',value=>{if(typeof value!=='boolean')throw Error('监听状态无效');engine.setRunning(value);return changed();});
     handle('settings:update',value=>{const {startup:nextStartup,...patch}=value;if(nextStartup!==undefined)startup=nextStartup===true;engine.updateConfig({...engine.snapshot().config,...patch});return changed();});
-    handle('config:update',value=>{engine.updateConfig(value);return changed();});
+    handle('config:update',value=>{engine.updateConfig({...value,running:engine.snapshot().config.running});return changed();});
     handle('phone-alerts:save',value=>{if(value.token)throw Error('界面测试版不保存密钥，请勿填写真实密钥。');alertConfig=validateSettings(value.config);return changed();});
     handle('media:preview',()=>({preview:null}));
     handle('browser:show',()=>true);handle('browser:bounds',()=>true);
     handle('app:background',()=>{window.minimize();return true;});
-    for(const name of ['running:set','phone-alerts:test','phone-alerts:setup','desktop-alert:test','media:add','platform:check','browser:reload','browser:home','profile:save','profile:probe','profile:pick','official:inspect','jobs:resolve','data:export','data:import','content:export','content:preview','content:repreview','content:apply','app:data-folder'])handle(name,unsupported);
+    for(const name of ['phone-alerts:test','phone-alerts:setup','desktop-alert:test','media:add','platform:check','browser:reload','browser:home','profile:save','profile:probe','profile:pick','official:inspect','jobs:resolve','data:export','data:import','content:export','content:preview','content:repreview','content:apply','app:data-folder'])handle(name,unsupported);
     handle('content:cancel',()=>({cancelled:true}));
     handle('simulate:order',value=>{engine.ingestOrder({...value,shopId:'preview-shop',buyerId:'preview-buyer',buyerName:'示例买家',orderId:'preview-'+Date.now(),itemId:'preview-item',paid:value.paid===true},{simulation:true});return changed();});
     handle('simulate:message',value=>{engine.ingestMessage({text:value.text,direction:'incoming',shopId:'preview-shop',buyerId:'preview-buyer-'+Date.now(),messageId:'preview-'+Date.now()},{simulation:true});return changed();});
@@ -50,7 +51,7 @@ else {
         await window.webContents.executeJavaScript(`document.querySelector('[data-section="${key}"]').click();void 0;`);await wait(150);
         fs.writeFileSync(path.join(directory,`${owner}-${key}.png`),(await window.webContents.capturePage()).toPNG());
       }
-      await window.webContents.executeJavaScript(`document.querySelector('[data-nav="settings"]').click();void 0;`);
+      await window.webContents.executeJavaScript(`document.querySelector('[data-nav="shop"]').click();void 0;`);
     }
     window.show();
     console.log(JSON.stringify({ok:true,mode:'ui-preview',directory,actualPlatformWrites:0,externalRequestsAllowed:false}));

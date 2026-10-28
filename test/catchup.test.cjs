@@ -109,12 +109,12 @@ test('recovery requires a current official pending incoming message and its swit
 });
 test('old v2 data accepts new optional settings and marks persisted queued replies for rechecking',t=>{
   const f=fixture(t);f.engine.ingestMessage(f.message());const raw=JSON.parse(fs.readFileSync(f.filePath));delete raw.config.autoListenOnLaunch;delete raw.config.catchUpUnrepliedEnabled;delete raw.ledger.replyRecovery;fs.writeFileSync(f.filePath,JSON.stringify(raw));
-  const loaded=f.create().snapshot();assert.equal(loaded.config.autoListenOnLaunch,false);assert.equal(loaded.config.catchUpUnrepliedEnabled,false);assert.equal(loaded.jobs[0].needsReplyVerification,true);
+  const loaded=f.create().snapshot();assert.equal(loaded.config.autoListenOnLaunch,false);assert.equal(loaded.config.catchUpUnrepliedEnabled,true);assert.equal(loaded.jobs[0].needsReplyVerification,true);
 });
-test('resuming rechecks existing queued replies and rule edits cancel stale reply bodies',t=>{
+test('resuming rechecks queued replies and rule edits refresh the unsent body in place',t=>{
   const f=fixture(t);const old=f.engine.ingestMessage(f.message());f.engine.prepareRepliesForResume();assert.equal(f.engine.snapshot().jobs[0].needsReplyVerification,true);
-  const config=f.engine.snapshot().config;config.replyRules[0].content='更新后的内容';f.engine.updateConfig(config);assert.equal(f.engine.snapshot().jobs[0].status,'cancelled');assert.equal(f.engine.snapshot().jobs[0].reason,'rules_changed');
-  const recovered=f.engine.recoverUnrepliedMessage(f.message());assert.equal(recovered.status,'created');assert.equal(recovered.job.content,'更新后的内容');assert.notEqual(recovered.job.id,old.id);
+  const config=f.engine.snapshot().config;config.replyRules[0].content='更新后的内容';f.engine.updateConfig(config);assert.equal(f.engine.snapshot().jobs[0].status,'queued');assert.equal(f.engine.snapshot().jobs[0].content,'更新后的内容');
+  const recovered=f.engine.recoverUnrepliedMessage(f.message());assert.equal(recovered.status,'queued');assert.equal(f.engine.snapshot().jobs[0].id,old.id);
 });
 test('a cooldown-skipped record from an older version can still recover when officially pending',async t=>{
   const f=fixture(t);const first=f.engine.ingestMessage(f.message());f.response({status:'confirmed',messageId:'server'});await f.engine.dispatch(first.id);

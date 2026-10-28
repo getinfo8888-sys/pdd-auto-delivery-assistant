@@ -109,7 +109,7 @@ test('all retries preserve the exact rule text while later attempts add a fresh 
   const tags = [];
   for (const attempted of f.calls.slice(2)) {
     assert.equal(attempted.content, original.content); assert.equal(attempted.replySuffixApplied, 'time-tag');
-    assert.equal(attempted.wireContent.startsWith(original.content + '\n'), true);
+    if(attempted.replyBodySpaceOffsets)assertThreeBodySpaces(attempted,original.content);else assert.equal(attempted.wireContent.startsWith(original.content + '\n'), true);
     assert.match(attempted.wireContent, /\n\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\n〔消息标记：[A-Z0-9]{6}〕$/u);
     assert.equal(attempted.wireContentSha256, sha(attempted.wireContent));
     tags.push(attempted.wireContent.match(/〔消息标记：([A-Z0-9]{6})〕$/u)[1]);
@@ -254,7 +254,7 @@ test('obsolete fallback settings are ignored without losing the actual configure
   assert.equal(Object.hasOwn(loaded, 'replyRetryFallback'), false); assert.equal(Object.hasOwn(defaults, 'replyRetryFallback'), false);
   assert.deepEqual(loaded.products, before.products); assert.deepEqual(loaded.replyRules, before.replyRules);
   assert.equal(loaded.autoReplyEnabled, before.autoReplyEnabled); assert.equal(loaded.autoDeliveryEnabled, before.autoDeliveryEnabled);
-  assert.equal(loaded.replyBodySpaceRetryEnabled, false);
+  assert.equal(loaded.replyBodySpaceRetryEnabled, true);
   assert.equal(validateConfig({ replyRetryFallback: { ignored: true } }).fallback, defaults.fallback);
   assert.throws(() => validateConfig({ replySuffixMode: 'time-tag' }), /选项/);
   assert.throws(() => validateConfig({ replyBodySpaceRetryEnabled: 'true' }), /布尔/);
@@ -347,15 +347,14 @@ test('body-space wires and offsets survive preflight deferral and reopening with
   }
 });
 
-test('the disabled body-space option leaves every original character unchanged through later retries', async t => {
-  const f = fixture(t); assert.equal(f.engine.snapshot().config.replyBodySpaceRetryEnabled, false);
+test('a legacy disabled recovery option cannot disable the built-in later retry stage', async t => {
+  const f = fixture(t);f.engine.updateConfig({...f.engine.snapshot().config,replyBodySpaceRetryEnabled:false});assert.equal(f.engine.snapshot().config.replyBodySpaceRetryEnabled, true);
   const { job } = await afterThreeDuplicates(f); const fourth = await f.engine.dispatch(job.id);
-  assert.equal(f.calls[3].content, job.content); assert.equal(f.calls[3].wireContent.startsWith(job.content + '\n'), true);
-  assert.equal(f.calls[3].replyBodySpaceOffsets, undefined); assert.equal(fourth.replyRetryBodySpaces, false);
-  assert.equal(fourth.replyAttemptHistory.some(row => Object.hasOwn(row, 'bodySpaceCount')), false);
+  assertThreeBodySpaces(f.calls[3],job.content);assert.equal(fourth.replyRetryBodySpaces,true);
+  assert.equal(fourth.replyAttemptHistory.some(row => Object.hasOwn(row, 'bodySpaceCount')), true);
 });
 
-test('an old blocked reply selects its body-space stage from the current switch and rejection count', async t => {
+test('old blocked replies retain built-in recovery regardless of their legacy switch value', async t => {
   for (const enabled of [false, true]) {
     const f = fixture(t); await legacyDuplicate(f);
     const stored = JSON.parse(fs.readFileSync(f.filePath)); stored.jobs[0].replyRetryCount = 3;
@@ -363,10 +362,9 @@ test('an old blocked reply selects its body-space stage from the current switch 
     const reopened = f.create(); reopened.setRunning(true);
     reopened.updateConfig({ ...reopened.snapshot().config, replyBodySpaceRetryEnabled: enabled });
     const recovery = reopened.recoverUnrepliedMessage(f.message()); assert.equal(recovery.status, 'created');
-    assert.equal(recovery.job.replyRetryBodySpaces, enabled); assert.equal(recovery.job.replyRetrySuffixMode, 'time-tag');
+    assert.equal(recovery.job.replyRetryBodySpaces, true); assert.equal(recovery.job.replyRetrySuffixMode, 'time-tag');
     f.respond({ status: 'confirmed', messageId: '10001' }); await reopened.dispatch(recovery.job.id);
-    if (enabled) assertThreeBodySpaces(f.calls.at(-1), recovery.job.content);
-    else assert.equal(f.calls.at(-1).wireContent.startsWith(recovery.job.content + '\n'), true);
+    assertThreeBodySpaces(f.calls.at(-1), recovery.job.content);
   }
 });
 

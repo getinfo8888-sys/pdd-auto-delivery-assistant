@@ -26,8 +26,8 @@ test('manual pause cancels a pending retry and an in-flight connection result',a
   failed.listener.stop();assert.equal(failed.timers.size,0);assert.equal(failed.listener.state.pending,false);
   let finish;const pending=fixture(()=>new Promise(resolve=>{finish=resolve;}));pending.listener.arm(config);pending.listener.stop();finish();await tick();assert.equal(pending.listener.state.phase,'paused');
 });
-test('disabled auto launch or no enabled functions never starts platform work',async()=>{
-  let calls=0;const {listener}=fixture(async()=>{calls++;});listener.arm({...config,autoListenOnLaunch:false});listener.arm({autoListenOnLaunch:true});await tick();assert.equal(calls,0);assert.equal(listener.state.phase,'disabled');
+test('disabled auto launch stays idle, while all feature switches off still permits passive listening',async()=>{
+  let calls=0;const {listener}=fixture(async()=>{calls++;});listener.arm({...config,autoListenOnLaunch:false});await tick();assert.equal(calls,0);listener.arm({autoListenOnLaunch:true});await tick();assert.equal(calls,1);assert.equal(listener.state.phase,'listening');
 });
 test('a previously running session recovers even when automatic launch is disabled',async()=>{
   let calls=0;const f=fixture(async()=>{if(++calls===1)throw Error('电脑离线，等待网络恢复');});
