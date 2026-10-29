@@ -37,6 +37,11 @@ test('last notification receipt remains available after a deliberate pause and o
   const f=await fixture(t);await f.post();f.advance(60000);await f.alarm();await f.post('paused',null,2);f.restart();
   const result=await f.ctx.storage.get('monitor');assert.equal(result.armed,false);assert.equal(result.incident,null);assert.equal(result.lastNotification.status,'accepted');assert.equal(result.lastNotification.receiptId,'fixture-receipt');
 });
+test('read-only heartbeat-token status queries cannot renew or disarm the cloud lease',async t=>{
+  const f=await fixture(t);await f.post();const before=await f.storage.get('monitor'),deadline=f.storage.alarm();const object=new f.cloud.Watchdog(f.ctx,f.env);
+  for(let i=0;i<6;i++){f.advance(10000);const response=await object.fetch(new Request('https://example.test/v1/state',{headers:{authorization:'Bearer '+heartbeatToken}}));assert.equal(response.status,200);assert.equal((await response.json()).armed,true);}
+  assert.deepEqual(await f.storage.get('monitor'),before);assert.equal(f.storage.alarm(),deadline);await f.alarm();assert.equal(f.calls(),1);
+});
 test('healthy recovery before fault submission suppresses stale fault',async t=>{
   const f=await fixture(t);await f.post('unhealthy','login');f.advance(55000);await f.post('healthy',null,2);f.advance(5000);await f.alarm();assert.equal(f.calls(),0);
   for(let i=3;i<=7;i++){f.advance(12000);await f.post('healthy',null,i);}await f.alarm();assert.equal(f.calls(),0);assert.equal(f.storage.state().incident,null);
@@ -101,6 +106,10 @@ test('cloud acknowledgement of missing push configuration restores local ownersh
   client.fetch=async(_url,options)=>{const body=JSON.parse(options.body);return Response.json({ok:true,version:1,acceptedSeq:body.seq,armed:body.mode!=='paused',pushConfigured:false});};
   f.advance(15000);await client.observe({wanted:true,healthy:true});assert.equal(client.snapshot().ownsMobile,false);assert.equal(client.snapshot().status,'error');
   await client.disable();assert.equal(client.snapshot().enabled,false);assert.equal(client.snapshot().status,'paused');
+});
+test('client reads cloud notification result without changing last accepted heartbeat or sending a body',async t=>{
+  const f=clientFixture(t),client=f.create();client.update({enabled:true,url:'https://fixture.example.workers.dev',token:heartbeatToken});await client.observe({wanted:true,healthy:true});const before=client.snapshot().lastAcceptedAt;
+  client.fetch=async(url,options)=>{assert.ok(url.endsWith('/v1/state'));assert.equal(options.body,undefined);return Response.json({ok:true,version:1,armed:true,incident:{id:'current',status:'accepted',at:1000000},secrets:'must-not-be-retained'});};f.advance(65000);await client.peek();assert.equal(client.snapshot().lastAcceptedAt,before);assert.equal(client.snapshot().cloudIncident.status,'accepted');assert.doesNotMatch(JSON.stringify(client.snapshot()),/must-not-be-retained/);
 });
 test('delegating mobile fault notifications to cloud preserves desktop and configured settings',t=>{
   const f=clientFixture(t),service=new AlertService({directory:f.directory,crypto:f.crypto});service.update({config:{enabled:true},token:'SCT'+'fixture'.repeat(8)});service.setRemoteOwner(true);assert.equal(service.snapshot().config.enabled,true);assert.equal(service.monitor.config.enabled,false);assert.equal(service.monitor.config.desktopEnabled,true);service.update({config:{enabled:true,desktopEnabled:true}});assert.equal(service.monitor.config.enabled,false);service.setRemoteOwner(false);assert.equal(service.monitor.config.enabled,true);service.dispose();

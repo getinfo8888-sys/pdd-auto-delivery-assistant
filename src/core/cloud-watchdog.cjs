@@ -11,7 +11,21 @@ class CloudWatchdog {
     this.file=path.join(directory,'cloud-watchdog.json');this.crypto=crypto;this.fetch=fetchImpl;this.now=now;this.changed=changed;this.runId=randomUUID();this.seq=0;this.busy=false;this.disposed=false;this.lastAttempt=-Infinity;this.document={version:1,enabled:false,url:'',secret:null,confirmed:false};
     try{if(fs.existsSync(this.file)){const value=JSON.parse(fs.readFileSync(this.file,'utf8'));if(value.version!==1||typeof value.enabled!=='boolean'||value.url&&endpoint(value.url)!==value.url||value.secret!==null&&typeof value.secret!=='string')throw Error();this.document=value;}}catch{this.error='云端监护配置无法读取，原文件已保留';this.invalid=true;}
   }
-  snapshot(){return {enabled:this.document.enabled,ownsMobile:this.document.enabled&&this.document.confirmed===true,url:this.document.url,configured:!!this.document.secret,status:this.status||'idle',error:this.error||null,lastAcceptedAt:this.lastAcceptedAt||null,cloudIncident:this.cloudIncident||null,lastNotification:this.lastNotification||null};}
+  snapshot(){return {enabled:this.document.enabled,ownsMobile:this.document.enabled&&this.document.confirmed===true,url:this.document.url,configured:!!this.document.secret,status:this.status||'idle',error:this.error||null,inspectionError:this.inspectionError||null,lastAcceptedAt:this.lastAcceptedAt||null,cloudIncident:this.cloudIncident||null,lastNotification:this.lastNotification||null};}
+  async peek(){
+    if(!this.document.enabled||this.disposed||this.invalid||this.inspecting)return;
+    this.inspecting=true;
+    try{
+      const token=this.crypto.decryptString(Buffer.from(this.document.secret,'base64'));
+      const response=await this.fetch(this.document.url+'/v1/state',{redirect:'error',signal:AbortSignal.timeout(10000),headers:{authorization:'Bearer '+token}});
+      const text=await response.text();if(text.length>8192)throw Error();const state=JSON.parse(text);
+      if(!response.ok||state.ok!==true||state.version!==1||typeof state.armed!=='boolean')throw Error();
+      const notice=value=>value?{id:String(value.id||'').slice(0,64),status:String(value.status||'').slice(0,32),at:Number.isFinite(value.at)?value.at:null}:null;
+      this.cloudIncident=notice(state.incident);this.lastNotification=notice(state.lastNotification);this.inspectionError=null;
+    }catch{this.inspectionError='暂未读到云端提醒结果；查询不会续期心跳，云端仍独立计时';}
+    finally{this.inspecting=false;this.changed();}
+    return this.snapshot();
+  }
   record(event){
     const signature=JSON.stringify(event);if(signature===this.lastLog)return;this.lastLog=signature;
     try{const file=path.join(path.dirname(this.file),'cloud-watchdog.jsonl');if(fs.existsSync(file)&&fs.statSync(file).size>1024*1024){fs.copyFileSync(file,file+'.previous');fs.writeFileSync(file,'');}fs.appendFileSync(file,JSON.stringify({at:new Date(this.now()).toISOString(),...event})+'\n');}catch{/* Optional diagnostics must never block customer service. */}

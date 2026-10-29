@@ -78,6 +78,10 @@ export class Watchdog {
       const admin=['/v1/status','/v1/probe'].includes(url.pathname);
       if(!await authorized(request,admin?this.env.ADMIN_TOKEN:this.env.HEARTBEAT_TOKEN))return reply({error:'unauthorized'},401);
       const s=await this.ctx.storage.get('monitor')||empty();
+      if(url.pathname==='/v1/state'&&request.method==='GET'){
+        const notice=value=>value?{id:value.id,status:value.status,at:value.at||value.startedAt}:null;
+        return reply({ok:true,version:1,armed:s.armed,incident:notice(s.incident),lastNotification:notice(s.lastNotification)});
+      }
       if(url.pathname==='/v1/status'&&request.method==='GET')return reply({ok:true,version:1,armed:s.armed,lastSeen:s.lastSeen,mode:s.mode,incident:s.incident,lastNotification:s.lastNotification||null,daily:s.daily});
       if(url.pathname==='/v1/probe'&&request.method==='GET'){
         let service;try{const response=await fetch('https://sctapi.ftqq.com/',{redirect:'manual',signal:AbortSignal.timeout(10000)});service={httpStatus:response.status,redirected:response.status>=300&&response.status<400};}catch(error){service={failed:true,errorType:['TypeError','TimeoutError','AbortError'].includes(error?.name)?error.name:'Error'};}
@@ -121,9 +125,9 @@ export default {
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname==='/health'&&request.method==='GET')return reply({ok:true,service:'pdd-assistant-watchdog',version:1});
-    if(!['/v1/heartbeat','/v1/status','/v1/probe'].includes(url.pathname))return reply({error:'not_found'},404);
+    if(!['/v1/heartbeat','/v1/state','/v1/status','/v1/probe'].includes(url.pathname))return reply({error:'not_found'},404);
     // Check credentials before instantiating the object, limiting unauthenticated work.
-    if(!await authorized(request,url.pathname==='/v1/heartbeat'?env.HEARTBEAT_TOKEN:env.ADMIN_TOKEN))return reply({error:'unauthorized'},401);
+    if(!await authorized(request,['/v1/heartbeat','/v1/state'].includes(url.pathname)?env.HEARTBEAT_TOKEN:env.ADMIN_TOKEN))return reply({error:'unauthorized'},401);
     return env.WATCHDOG.get(env.WATCHDOG.idFromName('single-monitor-v1')).fetch(request);
   }
 };

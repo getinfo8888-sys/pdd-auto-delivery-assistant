@@ -3,17 +3,17 @@
 const {app,BrowserWindow,ipcMain,net,safeStorage,session}=require('electron');
 const fs=require('node:fs'),path=require('node:path');
 const {CloudWatchdog}=require('../src/core/cloud-watchdog.cjs');
+const {PreviewController}=require('./cloud-watchdog/preview-controller.cjs');
 const root=path.resolve(__dirname,'..'),directory=path.join(root,'work','cloud-watchdog-preview');
 app.setName('pdd-assistant-cloud-preview');
 app.setAppUserModelId('local.linkfulfillment.workbench.cloud-preview');
 app.setPath('userData',path.join(directory,'browser-data'));
 if(!app.requestSingleInstanceLock())app.quit();
 else{
-  let window,client,timer,mode='paused';
-  const sample=()=>({wanted:mode!=='paused',healthy:mode==='healthy',online:mode!=='offline',reason:mode==='login'?'login':'offline'});
-  const snapshot=()=>({sampleMode:mode,...client.snapshot()});
+  let window,client,timer,controller;
+  const snapshot=()=>({...client.snapshot(),...controller.snapshot()});
   const changed=()=>{if(window&&!window.isDestroyed())window.webContents.send('preview:changed');};
-  const tick=async force=>{if(mode!=='offline')await client.observe(sample(),force);};
+  const tick=()=>controller.pulse();
   app.on('second-instance',()=>{window?.show();window?.focus();});
   app.whenReady().then(async()=>{
     fs.mkdirSync(directory,{recursive:true});
@@ -21,6 +21,7 @@ else{
     session.defaultSession.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*','ws://*/*','wss://*/*']},(_details,done)=>done({cancel:true}));
     const transportSession=session.fromPath(path.join(directory,'transport'),{cache:false});
     client=new CloudWatchdog({directory,crypto:safeStorage,changed,fetchImpl:(...args)=>transportSession.fetch(...args)});
+    controller=new PreviewController({client,changed});
     if(process.argv.includes('--provision-test')&&!client.snapshot().configured){
       const manifest=JSON.parse(fs.readFileSync(path.join(root,'work/cloud-watchdog-deployment.json'),'utf8'));
       const testSecrets=JSON.parse(fs.readFileSync(path.join(root,'work/cloud-watchdog-secrets.json'),'utf8'));
@@ -31,20 +32,20 @@ else{
     const handle=(name,action)=>ipcMain.handle('cloud-preview:'+name,async(event,value)=>{if(event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame)throw Error('无效的测试请求');return action(value);});
     handle('snapshot',snapshot);
     handle('save',value=>{client.update({...value,enabled:true});changed();return snapshot();});
-    handle('mode',async value=>{if(!['healthy','login','offline','paused'].includes(value))throw Error('无效的样本');if(client.busy)throw Error('上一条心跳尚未结束，请稍后再试');mode=value;await tick(true);changed();return snapshot();});
-    handle('disable',async()=>{mode='paused';await client.disable();changed();return snapshot();});
+    handle('mode',async value=>{await controller.select(value);return snapshot();});
+    handle('disable',async()=>{await controller.disable();return snapshot();});
     await window.loadFile(path.join(__dirname,'cloud-watchdog/preview.html'));
-    timer=setInterval(()=>{void tick(false);},5000);
+    timer=setInterval(()=>{void tick().catch(()=>{});},5000);
     console.log(JSON.stringify({ok:true,mode:'cloud-watchdog-preview',directory,actualPlatformWrites:0,productionDataAccess:false}));
-    if(process.argv.includes('--capture')){await tick(true);await new Promise(resolve=>setTimeout(resolve,250));fs.writeFileSync(path.join(directory,'preview.png'),(await window.webContents.capturePage()).toPNG());}
+    if(process.argv.includes('--capture')){await controller.select('paused');await new Promise(resolve=>setTimeout(resolve,250));fs.writeFileSync(path.join(directory,'preview.png'),(await window.webContents.capturePage()).toPNG());}
     if(process.argv.includes('--test-loss')){
       const assert=require('node:assert/strict'),wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
       const manifest=JSON.parse(fs.readFileSync(path.join(root,'work/cloud-watchdog-deployment.json'),'utf8'));
       const secrets=JSON.parse(fs.readFileSync(path.join(root,'work/cloud-watchdog-secrets.json'),'utf8'));
       const readRemote=async()=>{const response=await transportSession.fetch(manifest.url+'/v1/status',{headers:{authorization:'Bearer '+secrets.ADMIN_TOKEN},signal:AbortSignal.timeout(10000)});if(!response.ok)throw Error('无法核验云端状态');return response.json();};
-      const choose=async value=>{await window.webContents.executeJavaScript(`document.querySelector('[data-mode="${value}"]').click();void 0;`);const deadline=Date.now()+15000;while(client.busy||mode!==value){if(Date.now()>deadline)throw Error('样本切换超时');await wait(100);}await wait(100);};
-      await choose('healthy');assert.equal(client.snapshot().status,'connected','the real Electron transport must obtain a cloud receipt');
-      await choose('offline');const began=Date.now();console.log('Cloud loss simulation started; real PC networking and production assistant remain untouched.');
+      const choose=async value=>{await window.webContents.executeJavaScript(`document.querySelector('[data-mode="${value}"]').click();void 0;`);const deadline=Date.now()+15000;while(client.busy||controller.busy||controller.mode!==value){if(Date.now()>deadline)throw Error('样本切换超时');await wait(100);}await wait(100);};
+      await choose('offline');assert.equal(client.snapshot().status,'connected','direct offline click must first obtain a real armed receipt');
+      const began=Date.now();console.log('Cloud loss simulation started directly from paused; real PC networking and production assistant remain untouched.');
       let remote;
       try{
         const deadline=Date.now()+150000;
@@ -55,7 +56,7 @@ else{
         console.log(JSON.stringify(result));
         await window.webContents.executeJavaScript(`document.getElementById('incident').textContent='本次失联测试：推送服务已受理一次，请核对手机微信';void 0;`);
       }finally{
-        mode='paused';await tick(true);assert.equal(client.snapshot().status,'paused','cloud must acknowledge disarm after testing');
+        await controller.select('paused');assert.equal(client.snapshot().status,'paused','cloud must acknowledge disarm after testing');
         const final=await readRemote();assert.equal(final.armed,false);
         console.log('Test cloud monitor disarmed with receipt; no further test notifications scheduled.');
       }
