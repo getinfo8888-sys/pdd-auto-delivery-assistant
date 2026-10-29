@@ -22,7 +22,7 @@ class AlertService {
     if(input.clearToken===true){delete this.document.secrets[config.provider];config.enabled=false;}
     this.document.config=config;
     try{this.persist();}catch{this.document=previous;throw Error('手机提醒设置未能保存，原设置已保留');}
-    this.settingsError=null;this.monitor.update(config);return this.snapshot();
+    this.settingsError=null;this.monitor.update({...config,enabled:config.enabled&&!this.remoteOwner});return this.snapshot();
   }
   async deliver(message,event){
     if(this.sendOverride)return this.sendOverride(message,event);
@@ -38,6 +38,7 @@ class AlertService {
     catch(error){this.document.lastTest={status:'failed',at:this.now(),error:error.safeMessage||'测试提醒未取得服务受理确认，请检查通知设置与网络'};}
     this.persist();this.changed();return this.snapshot();
   }
+  setRemoteOwner(value){if(this.remoteOwner===value)return;this.remoteOwner=value;this.monitor.update({...this.document.config,enabled:this.document.config.enabled&&!value});}
   observe(sample){try{this.monitor.observe(sample);if(this.runtimeError){this.runtimeError=null;this.changed();}}catch{this.reportError();}}
   reportError(){if(this.runtimeError)return;this.runtimeError='异常提醒检测暂时失败，将继续重试；请查看助手连接状态';this.monitor.log('alert_monitor_failed',{});this.changed();}
   dispose(){this.monitor.dispose();}

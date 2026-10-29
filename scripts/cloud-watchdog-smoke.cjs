@@ -1,0 +1,33 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+async function run({app,window,engine,dataDir,cloudWatchdog,phoneAlerts,configureTestPlatform}){
+  const platform=require('./fixture-platform.cjs').createPlatform(),requests=[];
+  const token='fixture-cloud-heartbeat-key-00000000';
+  platform.sendCloudHeartbeat=async(url,options)=>{const body=JSON.parse(options.body);requests.push(body);return {ok:true,text:async()=>JSON.stringify({ok:true,version:1,acceptedSeq:body.seq,armed:body.mode!=='paused',pushConfigured:true})};};
+  configureTestPlatform(platform);
+  const js=code=>window.webContents.executeJavaScript(code);
+  const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  const until=async(check,label)=>{const deadline=Date.now()+15000;while(Date.now()<deadline){if(await check())return;await wait(50);}throw Error('Cloud sample timeout: '+label);};
+  await js(`window.workbench.call('settings:update',{autoReplyEnabled:true})`);
+  await js(`window.workbench.call('running:set',true)`);assert.equal(engine.snapshot().config.running,true);
+  await js(`window.workbench.call('phone-alerts:save',{config:{enabled:true},token:${JSON.stringify('SCT'+'fixture'.repeat(8))}})`);
+  await js(`window.workbench.call('cloud-watchdog:save',{enabled:true,url:'https://fixture.example.workers.dev',token:${JSON.stringify(token)}})`);
+  assert.equal(engine.snapshot().config.running,true);assert.equal(phoneAlerts.monitor.config.enabled,true,'local route remains until cloud is confirmed');
+  await until(()=>cloudWatchdog.snapshot().status==='connected','real health timer sends confirmed heartbeat');
+  assert.equal(phoneAlerts.snapshot().config.enabled,true);assert.equal(phoneAlerts.monitor.config.enabled,false);assert.equal(phoneAlerts.monitor.config.desktopEnabled,true);
+  assert.equal(requests[0].mode,'healthy');assert.deepEqual(Object.keys(requests[0]).sort(),['mode','reason','runId','sentAt','seq','version']);
+  assert.equal(await js(`(async()=>JSON.stringify(await window.workbench.call('snapshot')).includes(${JSON.stringify(token)}))()`),false);
+  await js(`document.querySelector('[data-nav="settings"]').click();void 0;`);
+  await until(()=>js(`!!document.querySelector('[data-section="alerts"]')`),'settings categories render');
+  await js(`document.querySelector('[data-section="alerts"]').click();void 0;`);
+  await until(()=>js(`!!document.querySelector('[data-cloud-watchdog]')`),'cloud settings render');
+  assert.equal(await js(`!!document.querySelector('[data-cloud-watchdog]')`),true);
+  assert.match(await js(`(async()=>{try{await window.workbench.call('cloud-watchdog:disable');return '';}catch(error){return error.message;}})()`),/先手动暂停/);
+  assert.equal(engine.snapshot().config.running,true);
+  await js(`window.workbench.call('running:set',false)`);
+  await js(`window.workbench.call('cloud-watchdog:disable')`);
+  assert.equal(requests.at(-1).mode,'paused');assert.equal(cloudWatchdog.snapshot().enabled,false);assert.equal(phoneAlerts.monitor.config.enabled,true);assert.equal(engine.snapshot().config.running,false);
+  const result={ok:true,actualPlatformWrites:0,externalRequests:0,assertions:['cloud configuration preserves listening','local mobile route remains until remote confirmation','one cloud owner avoids duplicate mobile alerts while desktop stays enabled','heartbeat contains no buyer/order data or secrets','renderer snapshots never expose credentials','stopping monitoring requires explicit manual pause and cloud acknowledgement','disabling restores saved local reminder settings']};
+  fs.writeFileSync(path.join(dataDir,'cloud-smoke-result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));app.quit();
+}
+module.exports={run};

@@ -18,6 +18,7 @@ const settingNumberKeys=['cooldownSeconds','maxPerMinute','firstReplyIntervalMin
 const settingKeys=new Set([...settingBooleanKeys,...settingNumberKeys,'suffix','replySuffixMode']);
 let settingsDraft={},settingsSaveTail=Promise.resolve(),settingsPending=0,settingsSaveError=null,settingsTimer,navigationRevision=0;
 let phoneAlertDraft=null;
+let cloudWatchdogDraft=null;
 const defaultSections={products:'list',replies:'content',settings:'runtime'};
 const sections={...defaultSections};
 let lastAutoPromptKey='';
@@ -212,7 +213,7 @@ function connectionSettings() {
   return `<div class="settings-stack"><section class="panel"><div class="panel-head"><h2>官方连接</h2></div><div class="panel-body"><p>${esc(state.connection.diagnostics.chat.message)}</p><div class="heading-actions">${button('检测官方连接','check-platform')}${button('打开店铺页面','open-shop')}</div><p class="small-note">实际发送、确认发货和退款结果，请在运行记录中核对平台回执。</p></div></section><section class="panel"><div class="panel-head"><h2>软件版本</h2></div><div class="panel-body">拼多多自动发货助手 v${esc(state.version)}</div></section></div>`;
 }
 function settings() {
-  const panels={runtime:runtimeSettings,backup:backupSettings,connection:connectionSettings,alerts:()=>`<div class="settings-stack">${phoneAlertPanel()}</div>`};
+  const panels={runtime:runtimeSettings,backup:backupSettings,connection:connectionSettings,alerts:()=>`<div class="settings-stack">${phoneAlertPanel()}${cloudWatchdogPanel()}</div>`};
   return heading('助手设置','本机运行、备份和提醒按类别管理；业务设置请到左侧对应功能。')+sectionTabs('settings',[['runtime','本机运行'],['backup','备份与迁移'],['connection','连接与版本'],['alerts','异常提醒']])+sectionPanel('settings',panels[sections.settings]());
 }
 
@@ -223,6 +224,7 @@ function phoneAlertPanel(){
   const status=[alerts.monitor.lastNotification,alerts.test].filter(Boolean).sort((a,b)=>(b.acceptedAt||b.lastAttemptAt||b.at)-(a.acceptedAt||a.lastAttemptAt||a.at))[0];
   const statuses={pending:'等待提交',submitting:'正在提交',accepted:'推送服务已受理',retrying:'等待重试',failed:'未取得服务受理确认',cancelled:'已取消'};
   return `<section class="panel" data-phone-alerts><div class="panel-head"><h2>异常提醒 · 桌面与手机</h2></div><div class="panel-body">
+  ${state.cloudWatchdog?.ownsMobile?'<p class="small-note">手机故障提醒已交由云端监护，本机继续显示桌面弹窗。下面的手机配置保留，停用云端监护后使用。</p>':''}
   ${switchRow('电脑右下角异常弹窗','默认开启，无需绑定手机。助手缩到托盘时也显示，不抢输入焦点；收起提示后继续自动恢复。','alert-desktop',c.desktopEnabled)}
   <div class="heading-actions">${button('预览桌面弹窗','desktop-alert-test')}</div>
   ${switchRow('启用手机提醒','持续异常且自动恢复失败后提醒；同一故障被服务受理后不重复提交。','alert-enabled',c.enabled)}
@@ -237,6 +239,25 @@ function phoneAlertPanel(){
   ${alerts.settingsError||alerts.monitor.persistenceError||alerts.runtimeError?`<div class="inline-error">${esc(alerts.settingsError||alerts.monitor.persistenceError||alerts.runtimeError)}</div>`:''}
   <p class="small-note">默认持续异常60秒、至少3次检测或恢复失败后提醒，同一故障不反复弹出。正常并稳定一分钟后自动收起；手动暂停不报警。此处单独保存，不会暂停监听。密钥不随规则备份或迁移导出。测试显示“服务已受理”后，请亲自确认手机能收到。电脑断网时仍可显示桌面提示，但无法即时向手机推送；休眠、关机或程序退出需外部心跳监测补足。断网恢复后会补充尚未发出的故障摘要。</p>
   </div></section>`;
+}
+function cloudWatchdogPanel(){
+  const c=state.cloudWatchdog;if(!c)return '';
+  const draft=cloudWatchdogDraft||c;
+  const status={idle:'尚未连接',connected:'云端已确认心跳',paused:'云端已确认主动暂停',error:'心跳未取得回执'};
+  const notice=c.cloudIncident||c.lastNotification;
+  const notices={pending:'故障等待确认',submitting:'正在提交',retrying:'等待重试',accepted:'推送服务已受理',uncertain:'推送未取得可核验回执',failed:'推送未受理，请检查云端配置或服务额度'};
+  return `<section class="panel" data-cloud-watchdog><div class="panel-head"><h2>云端离线监护</h2></div><div class="panel-body">
+  <p>电脑断网、休眠或助手停止运行时，由独立云端通知微信。每15秒报平安，持续失联或运行异常约一分钟后提醒。</p>
+  <div class="form-grid"><label class="field"><span>云端监护地址</span><input id="cloud-url" type="url" value="${esc(draft.url||'')}" placeholder="填写已部署的 Cloudflare HTTPS 根地址"></label><label class="field"><span>心跳密钥</span><input id="cloud-token" type="password" autocomplete="new-password" maxlength="128" value="${esc(draft.token||'')}" placeholder="${c.configured?'已加密保存；留空保留':'填写部署时生成的心跳密钥'}"></label></div>
+  <div class="heading-actions">${button(c.enabled?'保存监护配置':'保存并启用云端监护','cloud-watchdog-save',true)}${button('停用云端监护','cloud-watchdog-disable',false,c.enabled?'':'disabled')}</div>
+  <p class="small-note">${c.enabled?'云端监护已启用':'云端监护未启用'} · ${esc(status[c.status]||c.status)}${c.lastAcceptedAt?' · 最近确认：'+fmt(c.lastAcceptedAt):''}${cloudWatchdogDraft?' · 有修改待保存':''}</p>
+  ${notice?`<p class="small-note">最近云端故障提醒：${esc(notices[notice.status]||notice.status)}${notice.at?' · '+fmt(notice.at):''}</p>`:''}
+  ${c.error?`<div class="inline-error">${esc(c.error)}</div>`:''}
+  <p class="small-note">仅发送运行状态，不上传聊天、订单、Cookie 或店铺资料。启用后手机故障提醒统一由云端提交，本机继续显示桌面弹窗。手动暂停且云端确认后不报警；直接退出程序、关机、休眠仍会提醒。停用前请先手动暂停监听。Server酱 SendKey 需要单独配置在你自己的云端 Secrets 中，不会自动上传本机密钥。免费额度及实际送达时间以服务为准。</p>
+  </div></section>`;
+}
+function rememberCloudWatchdogDraft(){
+  if(document.getElementById('cloud-url'))cloudWatchdogDraft={url:document.getElementById('cloud-url').value,token:document.getElementById('cloud-token').value};
 }
 function rememberPhoneAlertDraft(){
   if(!document.getElementById('alert-route'))return;
@@ -361,6 +382,8 @@ function jobDetail(id) {
 }
 async function action(name, target) {
   if(name==='phone-alert-save'){await savePhoneAlertSettings();toast('提醒设置已保存，监听继续运行');return;}
+  if(name==='cloud-watchdog-save'){rememberCloudWatchdogDraft();state=await call('cloud-watchdog:save',{...cloudWatchdogDraft,enabled:true});cloudWatchdogDraft=null;render();toast('监护配置已保存，等待云端确认心跳');return;}
+  if(name==='cloud-watchdog-disable'){state=await call('cloud-watchdog:disable');cloudWatchdogDraft=null;render();toast('云端已确认停用监护');return;}
   if(name==='phone-alert-test'){await savePhoneAlertSettings();state=await call('phone-alerts:test');render();toast(state.phoneAlerts.test?.status==='accepted'?'推送服务已受理，请查看手机是否收到':state.phoneAlerts.test?.error||'未取得服务受理确认',state.phoneAlerts.test?.status!=='accepted');return;}
   if(name==='phone-alert-setup'){rememberPhoneAlertDraft();return call('phone-alerts:setup',phoneAlertDraft.config.provider);}
   if(name==='phone-alert-clear'){rememberPhoneAlertDraft();phoneAlertDraft.config.enabled=false;state=await call('phone-alerts:save',{config:phoneAlertDraft.config,clearToken:true});phoneAlertDraft=null;render();toast('密钥已清除，手机提醒已关闭');return;}
@@ -492,6 +515,7 @@ document.addEventListener('click',async event=>{
   try {await flushSettings();await action(target.dataset.action,target);}catch(error){if(error.message)toast(error.message,true);}finally{busy=false;if(target.isConnected)target.disabled=false;}
 });
 document.addEventListener('input',event=>{
+  if(page==='settings'&&event.target.closest('[data-cloud-watchdog]')){rememberCloudWatchdogDraft();return;}
   if(page==='settings'&&event.target.closest('[data-phone-alerts]')){rememberPhoneAlertDraft();return;}
   if(event.target.id==='search'){filter=event.target.value;const position=event.target.selectionStart;render();const input=document.querySelector('#search');input.focus();input.setSelectionRange(position,position);return;}
   if(settingKeys.has(event.target.id)){

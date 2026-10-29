@@ -1,0 +1,11 @@
+{
+  "name": "pdd-assistant-watchdog-test",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-29",
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "durable_objects": {
+    "bindings": [{ "name": "WATCHDOG", "class_name": "Watchdog" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Watchdog"] }]
+}

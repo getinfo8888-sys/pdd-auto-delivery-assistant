@@ -16,6 +16,7 @@ else {
   let window,engine,revision=0,startup=false,alertConfig={...alertDefaults};
   const snapshot=()=>({...engine.snapshot(),revision,readOnly:true,preview:true,version:require('../package.json').version+' · 界面测试版',startup,dataDir:directory,
     autoStart:{phase:'idle',pending:false},catchUp:{phase:'disabled'},
+    cloudWatchdog:{enabled:false,configured:false,url:'',status:'idle',error:null,lastAcceptedAt:null},
     phoneAlerts:{config:alertConfig,credentials:{serverchan:false,pushplus:false},encryptionAvailable:false,monitor:{incident:null,lastNotification:null},test:null},
     connection:{profile:defaultProfile(),diagnostics:{chat:{ready:false,message:'界面测试版使用本地虚构数据，正式助手继续接待。'},notes:[]},bridge:{chat:{ready:false},orders:{ready:false},refunds:{ready:false}},urls:{},pages:{},network:{phase:'online'},coverage:'界面预览不连接真实店铺。'}});
   const changed=()=>{revision++;window.webContents.send('state:changed');return snapshot();};
@@ -37,7 +38,7 @@ else {
     handle('media:preview',()=>({preview:null}));
     handle('browser:show',()=>true);handle('browser:bounds',()=>true);
     handle('app:background',()=>{window.minimize();return true;});
-    for(const name of ['phone-alerts:test','phone-alerts:setup','desktop-alert:test','media:add','platform:check','browser:reload','browser:home','profile:save','profile:probe','profile:pick','official:inspect','jobs:resolve','data:export','data:import','content:export','content:preview','content:repreview','content:apply','app:data-folder'])handle(name,unsupported);
+    for(const name of ['cloud-watchdog:save','cloud-watchdog:disable','phone-alerts:test','phone-alerts:setup','desktop-alert:test','media:add','platform:check','browser:reload','browser:home','profile:save','profile:probe','profile:pick','official:inspect','jobs:resolve','data:export','data:import','content:export','content:preview','content:repreview','content:apply','app:data-folder'])handle(name,unsupported);
     handle('content:cancel',()=>({cancelled:true}));
     handle('simulate:order',value=>{engine.ingestOrder({...value,shopId:'preview-shop',buyerId:'preview-buyer',buyerName:'示例买家',orderId:'preview-'+Date.now(),itemId:'preview-item',paid:value.paid===true},{simulation:true});return changed();});
     handle('simulate:message',value=>{engine.ingestMessage({text:value.text,direction:'incoming',shopId:'preview-shop',buyerId:'preview-buyer-'+Date.now(),messageId:'preview-'+Date.now()},{simulation:true});return changed();});

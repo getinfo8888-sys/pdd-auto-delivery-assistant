@@ -11,7 +11,7 @@ function inspectPublicFile(file,bytes) {
   if(/\.(?:png|ico|jpe?g)$/i.test(name))return issues;
   if(bytes.includes(0))issues.push('unexpected_binary_file');
   const text=bytes.toString('utf8');
-  const patterns={private_key:/-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/,github_token:/(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})/,openai_key:/\bsk-(?:proj-)?[A-Za-z0-9_-]{30,}/,personal_windows_path:/\b[A-Za-z]:[\\/]+Users[\\/]+(?!Public(?:[\\/]|\b)|Default(?:[\\/]|\b))[^\\/\s"'<>]+/i,credential_in_url:/https?:\/\/[^\s/:@]+:[^\s/@]+@/};
+  const patterns={private_key:/-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/,github_token:/(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})/,openai_key:/\bsk-(?:proj-)?[A-Za-z0-9_-]{30,}/,serverchan_key:/\bSCT\d{4,}[A-Za-z0-9]{16,220}\b/,personal_windows_path:/\b[A-Za-z]:[\\/]+Users[\\/]+(?!Public(?:[\\/]|\b)|Default(?:[\\/]|\b))[^\\/\s"'<>]+/i,credential_in_url:/https?:\/\/[^\s/:@]+:[^\s/@]+@/};
   for(const [label,pattern] of Object.entries(patterns))if(pattern.test(text))issues.push(label);
   return issues;
 }

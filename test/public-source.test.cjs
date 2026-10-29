@@ -13,3 +13,7 @@ test('public scan permits source, workflows and public image assets',()=>{
   for(const file of ['src/main.cjs','test/core.test.cjs','scripts/fixture-platform.cjs','.github/workflows/ci.yml','src/renderer/icon.png'])assert.deepEqual(inspectPublicFile(file,Buffer.from('public sample')),[]);
   assert.ok(inspectPublicFile('src/bundle.cjs',Buffer.alloc(2*1024*1024+1,65)).includes('oversized_source_file'));
 });
+test('public scan rejects a Serverchan production key without exposing it',()=>{
+  const key='SCT'+'123456'+'a'.repeat(24);
+  assert.ok(inspectPublicFile('src/example.cjs',Buffer.from(key)).includes('serverchan_key'));
+});
