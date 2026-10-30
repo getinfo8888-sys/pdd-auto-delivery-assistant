@@ -1,6 +1,6 @@
 # 拼多多自动发货助手
 
-**[点击下载安装包，双击后按提示安装即可使用](https://github.com/getinfo8888-sys/pdd-auto-delivery-assistant/releases/download/v0.3.17/PDD-Auto-Delivery-Assistant-Setup-0.3.17-x64.exe)**
+**[点击下载安装包，双击后按提示安装即可使用](https://github.com/getinfo8888-sys/pdd-auto-delivery-assistant/releases/download/v0.3.18/PDD-Auto-Delivery-Assistant-Setup-0.3.18-x64.exe)**
 
 适用 Windows 10 / 11 的 64 位电脑。无需懂代码，不用安装 Node.js，也不用下载源码。
 
@@ -8,7 +8,7 @@ Windows 本地桌面工具，通过商家本人登录的拼多多官方商家页
 
 ## 怎么下载安装和使用
 
-1. **[点这里下载安装包](https://github.com/getinfo8888-sys/pdd-auto-delivery-assistant/releases/download/v0.3.17/PDD-Auto-Delivery-Assistant-Setup-0.3.17-x64.exe)**，保存到电脑。
+1. **[点这里下载安装包](https://github.com/getinfo8888-sys/pdd-auto-delivery-assistant/releases/download/v0.3.18/PDD-Auto-Delivery-Assistant-Setup-0.3.18-x64.exe)**，保存到电脑。
 2. 双击下载的文件，按提示点“下一步”→“安装”→“完成”。以后双击桌面的“拼多多自动发货助手”就能打开。
 3. 打开软件，登录自己的拼多多商家账号，设置要回复、发货的内容，再点“开始监听”。
 
