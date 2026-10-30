@@ -35,6 +35,67 @@ test('catch-up chooses a keyword or fallback without resending the welcome',t=>{
   assert.equal(f.engine.recoverUnrepliedMessage(f.message()).job.content,'试玩内容');
   assert.equal(f.engine.recoverUnrepliedMessage(f.message({buyerId:'b2',messageId:'m2',text:'你好'})).job.content,'默认说明');assert.equal(f.engine.snapshot().jobs.length,2);
 });
+const pendingFallback=(source,marker='withdrawn-message')=>{
+  const pendingSince=source.sentAt;
+  return {...source,messageId:'official-pending:'+JSON.stringify([marker,pendingSince]),text:'',officialPendingFallback:{markerMessageId:marker,pendingSince,historyVerified:true}};
+};
+test('withdrawn and nontext pending recovery always uses the configured default, with durable deduplication',async t=>{
+  const f=fixture(t);f.engine.updateConfig({...f.engine.snapshot().config,greetingEnabled:true,greeting:'欢迎',replyRules:[{id:'all',name:'通配',keywords:['*'],matchType:'wildcard',content:'不应匹配撤回正文',enabled:true}]});
+  const source=pendingFallback(f.message());
+  const recovery=f.engine.recoverUnrepliedMessage(source);
+  assert.equal(recovery.status,'created');assert.equal(recovery.job.content,'默认说明');assert.equal(recovery.job.strategy,'fallback');
+  assert.equal(recovery.job.needsReplyVerification,true);assert.deepEqual(recovery.job.officialPendingFallback,source.officialPendingFallback);
+  assert.equal(f.engine.recoverUnrepliedMessage(source).status,'queued');
+  f.response({status:'confirmed',messageId:'server-receipt'});await f.engine.dispatch(recovery.job.id);
+  const reopened=f.create();reopened.setRunning(true);
+  assert.equal(reopened.recoverUnrepliedMessage(source).status,'already_handled');assert.equal(f.calls.length,1);
+});
+test('a new pending cycle of an already answered withdrawn source can be recovered once',async t=>{
+  const f=fixture(t),first=pendingFallback(f.message());
+  f.response({status:'confirmed',messageId:'server-first'});
+  await f.engine.dispatch(f.engine.recoverUnrepliedMessage(first).job.id);
+  f.advance(20000);
+  const newer=pendingFallback(f.message({sentAt:first.sentAt+20000}));
+  assert.equal(f.engine.recoverUnrepliedMessage(newer).status,'created');
+  assert.equal(f.engine.recoverUnrepliedMessage(newer).status,'queued');
+});
+test('default recovery rejects missing, mismatched and mixed official proof',t=>{
+  const f=fixture(t),source=pendingFallback(f.message());
+  for(const patch of [{historyVerified:false},{markerMessageId:'other'},{pendingSince:source.sentAt+1},{pendingSince:0}]){
+    assert.throws(()=>f.engine.recoverUnrepliedMessage({...source,officialPendingFallback:{...source.officialPendingFallback,...patch}}),/证据/);
+  }
+  assert.throws(()=>f.engine.recoverUnrepliedMessage({...source,text:'已撤回的内容不可用于关键词匹配'}),/证据/);
+  assert.throws(()=>f.engine.recoverUnrepliedMessage({...source,platformHintPending:{hintMessageId:'hint',sourceMessageId:source.messageId,pendingSince:source.sentAt,historyVerified:true}}),/不能混用/);
+  assert.equal(f.engine.snapshot().jobs.length,0);
+});
+test('editing settings preserves a queued pending default instead of selecting an empty-text wildcard',t=>{
+  const f=fixture(t),source=pendingFallback(f.message());
+  const job=f.engine.recoverUnrepliedMessage(source).job;
+  f.engine.updateConfig({...f.engine.snapshot().config,fallback:'最新默认说明',replyRules:[{id:'all',name:'通配',keywords:['*'],matchType:'wildcard',content:'不应发送的文字',enabled:true}]});
+  const updated=f.engine.snapshot().jobs.find(row=>row.id===job.id);
+  assert.equal(updated.content,'最新默认说明');assert.equal(updated.status,'queued');assert.equal(updated.needsReplyVerification,true);
+});
+test('a failed default reply remains queued, retries the configured content and requires an acknowledgement',async t=>{
+  const f=fixture(t),source=pendingFallback(f.message());
+  f.response({status:'rejected',reason:'请勿重复发送相同消息'});
+  const job=f.engine.recoverUnrepliedMessage(source).job;
+  await f.engine.dispatch(job.id);
+  const retry=f.engine.snapshot().jobs.find(row=>row.id===job.id);
+  assert.equal(retry.status,'queued');assert.equal(retry.needsReplyVerification,true);assert.equal(retry.content,'默认说明');
+  assert.equal(f.engine.recoverUnrepliedMessage(source).status,'queued');
+  f.advance(4000);f.response({status:'confirmed',messageId:'retry-receipt'});
+  await f.engine.dispatch(job.id);
+  assert.equal(f.engine.snapshot().jobs.find(row=>row.id===job.id).status,'sent');assert.equal(f.calls.length,2);
+});
+test('fresh verified pending state recovers an unsent default cancelled by an earlier preflight',async t=>{
+  const f=fixture(t),source=pendingFallback(f.message());
+  const job=f.engine.recoverUnrepliedMessage(source).job;
+  f.response({status:'skipped',reason:'会话已有回复或出现新消息'});await f.engine.dispatch(job.id);
+  assert.equal(f.engine.snapshot().jobs.find(row=>row.id===job.id).reason,'conversation_changed');
+  const resumed=f.engine.recoverUnrepliedMessage(source);
+  assert.equal(resumed.status,'created');assert.equal(resumed.job.officialPendingFallbackRecoveryJobId,job.id);
+  assert.equal(f.engine.recoverUnrepliedMessage(source).status,'queued');
+});
 test('changed contents may recover an explicitly rejected attempt, with a fresh durable claim',async t=>{
   const f=fixture(t);const first=f.engine.recoverUnrepliedMessage(f.message());await f.engine.dispatch(first.job.id);
   const config=f.engine.snapshot().config;config.replyRules[0].content='新的试玩说明';f.engine.updateConfig(config);

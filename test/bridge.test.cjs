@@ -163,6 +163,70 @@ test('both pending lists recover the buyer message behind an official automatic 
 });
 
 const platformWaitHint=(extra={})=>pendingRow({msg_id:'wait-notice',type:51,no_unreply_hint:1,content:'等待提醒（隔离样本）',ts:Math.floor(Date.now()/1000),...extra});
+test('every officially pending buyer message type gets a verified default recovery key',async()=>{
+  for(const type of [1,7,8,42,999])for(const action of ['unreplied','unreplied-history','reply-check']){
+    const marker=pendingRow({msg_id:'withdrawn-or-nontext',type,content:'',ts:Math.floor(Date.now()/1000)});
+    const page={result:'ok',conversations:[marker],has_more:false};
+    const f=fixture({pendingList:page,history:page,latest:{result:'ok',uid:'123',conversation:marker},conversationHistory:{result:'ok',messages:[marker,historyWelcome({ts:marker.last_unreply_time-10})]}});
+    const result=await f.run(action,{buyerId:'123'}),message=action==='reply-check'?result.message:result.messages[0];
+    assert.equal(result.ready,true);assert.ok(message);assert.equal(message.text,'');
+    assert.equal(message.messageId,'official-pending:'+JSON.stringify([marker.msg_id,marker.last_unreply_time*1000]));
+    assert.deepEqual(message.officialPendingFallback,{markerMessageId:marker.msg_id,pendingSince:marker.last_unreply_time*1000,historyVerified:true});
+    assert.equal(f.calls.some(row=>row.send||row.socketSend||row.httpSend),false);
+    assert.equal(f.calls.find(row=>row.listArgs).listArgs.notUpdateUnreplyTs,true);
+  }
+});
+test('a pending card without usable text also uses the default, while a human reply wins',async()=>{
+  const marker=pendingRow({sub_type:1,content:'试玩（卡片说明，不是买家文字）'});
+  const pending=await fixture({latest:{result:'ok',uid:'123',conversation:marker},conversationHistory:{result:'ok',messages:[marker]}}).run('reply-check',{buyerId:'123'});
+  assert.equal(pending.pending,true);assert.equal(pending.message.text,'');
+  const manual=historyWelcome({ts:marker.ts+1});
+  const answered=await fixture({latest:{result:'ok',uid:'123',conversation:marker},conversationHistory:{result:'ok',messages:[manual,marker]}}).run('reply-check',{buyerId:'123'});
+  assert.equal(answered.pending,false);
+});
+test('a withdrawn message represented by the official type-31 notice recovers without reusing its old text',async()=>{
+  const marker=pendingRow({msg_id:'withdrawn-original-id',type:31,content:'试玩（撤回前残留，不应用于匹配）',info:{mall_content:'对方撤回了一条消息'},ts:Math.floor(Date.now()/1000)});
+  const oldReply=historyWelcome({ts:marker.last_unreply_time-10});
+  const page={result:'ok',conversations:[marker],has_more:false};
+  for(const action of ['unreplied','unreplied-history','reply-check']){
+    const f=fixture({pendingList:page,history:page,latest:{result:'ok',uid:'123',conversation:marker},conversationHistory:{result:'ok',messages:[marker,oldReply]}});
+    const result=await f.run(action,{buyerId:'123'}),message=action==='reply-check'?result.message:result.messages[0];
+    assert.equal(result.ready,true);assert.ok(message.officialPendingFallback);assert.equal(message.text,'');
+    assert.equal(f.calls.some(row=>row.send||row.socketSend||row.httpSend),false);
+  }
+  const onlyMarker=await fixture({latest:{result:'ok',uid:'123',conversation:marker},conversationHistory:{result:'ok',messages:[marker]}}).run('reply-check',{buyerId:'123'});
+  assert.equal(onlyMarker.pending,true);assert.ok(onlyMarker.message.officialPendingFallback);
+});
+test('cleared, foreign and missing pending markers cannot create default replies',async()=>{
+  const marker=pendingRow({type:999});
+  for(const patch of [{last_unreply_time:0},{from:{uid:'123',role:'user',user_type:6}},{chat_type:'conciliation'}]){
+    const f=fixture({latest:{result:'ok',uid:'123',conversation:{...marker,...patch}}});
+    assert.equal((await f.run('reply-check',{buyerId:'123'})).pending,false);
+  }
+  for(const messages of [[],[{...marker,to:{uid:'foreign',role:'mall_cs'}}],[{...marker,type:1}]]){
+    const f=fixture({latest:{result:'ok',uid:'123',conversation:marker},conversationHistory:{result:'ok',messages}});
+    assert.equal((await f.run('reply-check',{buyerId:'123'})).ready,false);
+  }
+});
+test('one unresolved pending history does not hide other buyers and remains visible for retry',async()=>{
+  const marker=pendingRow({type:999}),other=pendingRow({msg_id:'another-source',from:{uid:'456',role:'user'}});
+  for(const action of ['unreplied','unreplied-history']){
+    const page={result:'ok',conversations:[marker,other],has_more:false};
+    const f=fixture({pendingList:page,history:page,conversationHistory:{result:'ok',messages:[]}});
+    const result=await f.run(action);
+    assert.equal(result.ready,true);assert.equal(result.messages[0].buyerId,'456');assert.equal(result.deferred.length,1);
+    assert.match(result.deferred[0].reason,/待回复标记/);
+  }
+});
+test('a latest nontext event without a wait timestamp is rechecked against the official pending list',async()=>{
+  const marker=pendingRow({type:999}),latest={...marker};delete latest.last_unreply_time;
+  const f=fixture({latest:{result:'ok',uid:'123',conversation:latest},pendingList:{conversations:[marker],has_more:false},conversationHistory:{result:'ok',messages:[marker]}});
+  const result=await f.run('reply-check',{buyerId:'123'});
+  assert.equal(result.pending,true);assert.ok(result.message.officialPendingFallback);
+  assert.equal(f.calls.some(row=>row.path==='/plateau/chat/unreply_conversations'),true);
+  const answered=await fixture({latest:{result:'ok',uid:'123',conversation:latest},pendingList:{conversations:[],has_more:false}}).run('reply-check',{buyerId:'123'});
+  assert.equal(answered.pending,false);
+});
 test('pending scans and preflight recover the real inquiry hidden behind a platform wait notice',async()=>{
   for(const action of ['unreplied','unreplied-history','reply-check']){
     const notice=platformWaitHint(),source=historySource({ts:notice.last_unreply_time,content:'https://example.test/goods/demo'});
@@ -206,14 +270,16 @@ test('a human reply and a cleared official pending marker still prevent an autom
   const result=await f.run('reply-check',{buyerId:'123'});assert.equal(result.ready,true);assert.equal(result.pending,false);
 });
 
-test('unknown automatic-reply history is deferred rather than declaring the buyer answered',async()=>{
+test('invalid automatic-reply history is deferred rather than declaring the buyer answered',async()=>{
   const auto=officialAuto();
   for(const history of [{result:'fail',messages:[]},{result:'ok',messages:[]},
-    {result:'ok',messages:[officialAuto({to:{uid:'another',role:'user'}}),historySource()]},
-    {result:'ok',messages:[auto,historySource({ts:auto.ts-1000})]}]){
+    {result:'ok',messages:[officialAuto({to:{uid:'another',role:'user'}}),historySource()]}]){
     const f=fixture({latest:{result:'ok',uid:'123',conversation:auto},conversationHistory:history});
     const result=await f.run('reply-check',{buyerId:'123'});assert.equal(result.ready,false);assert.equal(f.api.send,f.originalSend);
   }
+  const stale=fixture({latest:{result:'ok',uid:'123',conversation:auto},conversationHistory:{result:'ok',messages:[auto,historySource({ts:auto.ts-1000})]}});
+  const pending=await stale.run('reply-check',{buyerId:'123'});
+  assert.equal(pending.pending,true);assert.equal(pending.message.text,'');assert.ok(pending.message.officialPendingFallback);
 });
 
 test('official automatic bubbles do not count as human intervention in an own follow-up',async()=>{

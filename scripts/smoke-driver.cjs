@@ -214,6 +214,16 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   assert.ok(engine.snapshot().logs.some(row=>row.jobId===coveredReply.id&&row.code==='platform_hint_pending_queued'));
   await maintainPendingReplies(true);
   assert.equal(platform.data.actions.filter(row=>row.jobId===coveredReply.id).length,1);
+  const pendingSince=Date.now()-120000,withdrawnId='sample-withdrawn-marker';
+  const withdrawn={shopId:platform.data.shopId,buyerId:'withdrawn-sample-buyer',buyerName:'撤回补答隔离样本',messageId:'official-pending:'+JSON.stringify([withdrawnId,pendingSince]),text:'',sentAt:pendingSince,direction:'incoming',pending:true,type:'0',subType:'0',officialPendingFallback:{markerMessageId:withdrawnId,pendingSince,historyVerified:true}};
+  platform.data.unreplied.push(withdrawn);
+  await maintainPendingReplies(true);
+  await until(()=>engine.snapshot().jobs.some(row=>row.messageId===withdrawn.messageId&&row.status==='sent'),'withdrawn pending event receives configured fallback');
+  const withdrawnReply=engine.snapshot().jobs.find(row=>row.messageId===withdrawn.messageId);
+  assert.equal(withdrawnReply.content,engine.snapshot().config.fallback);assert.ok(withdrawnReply.sentMessageId);
+  assert.ok(engine.snapshot().logs.some(row=>row.jobId===withdrawnReply.id&&row.code==='official_pending_fallback_queued'));
+  await maintainPendingReplies(true);
+  assert.equal(platform.data.actions.filter(row=>row.jobId===withdrawnReply.id).length,1);
   const phoneNotices=[];platform.sendPhoneAlert=async(message,event)=>{phoneNotices.push({message,event});return {accepted:true,receiptId:'fixture-phone-receipt'};};
   // Simulate an offline incident with a fake clock, never touching the actual network.
   const realNow=phoneAlerts.monitor.now;let alertClock=Date.now();phoneAlerts.monitor.now=()=>alertClock;
@@ -284,6 +294,7 @@ async function run({ app, window, tray, trayMenu, engine, dataDir, maintainPendi
   results.assertions.push('offline desktop alert works with no phone key and uses screen work area','dismissing an alert does not pause recovery or reopen the same incident','desktop popup opens the existing assistant and rejects another sender');
   results.backgroundRejectedAttempts=backgroundRejectedAttempts;
   results.assertions.push('a platform notice cannot hide an offline pending inquiry from maintenance','notice-covered inquiry uses configured fallback and requires a receipt','a second scan does not duplicate a notice-covered reply');
+  results.assertions.push('withdrawn and nontext pending events use configured default reply','default recovery requires the normal receipt pipeline','repeated pending scans do not duplicate a recovered withdrawal');
   results.assertions.push('phone reminder settings persist without pausing business','phone credentials are never echoed in snapshots or input fields','manual phone test uses only the isolated notification service','phone monitor observes the real application connection state');
   results.assertions.push('helper settings default to local runtime and place alerts last','reply, delivery and refund controls save from their own pages','tab switches preserve settings and share the existing link preference');
   results.liveSettings=liveSettings;

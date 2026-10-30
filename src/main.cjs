@@ -710,9 +710,10 @@ async function pump() {
 
 async function scanUnreplied(nonce = runNonce) {
   if (!engine.snapshot().config.running || nonce !== runNonce) return;
+  if(catchUpTimer){clearTimeout(catchUpTimer);catchUpTimer=null;}
   const token = ++catchUpToken;
   catchUpCollecting = true;
-  catchUpState = { phase:'scanning', scanned:0, candidates:0, created:0, skipped:0, checkedAt:Date.now() }; changed();
+  catchUpState = { phase:'scanning', scanned:0, candidates:0, created:0, skipped:0, deferred:0, checkedAt:Date.now() }; changed();
   try {
     const latest = new Map();
     const endTime = Math.floor(Date.now()/1000);
@@ -723,6 +724,7 @@ async function scanUnreplied(nonce = runNonce) {
         if (nonce !== runNonce || token !== catchUpToken || !engine.snapshot().config.running) return;
         if (!result.ready || !Array.isArray(result.messages)) throw Error(result.reason || '待回复列表读取失败');
         catchUpState.scanned += result.scanned ?? result.messages.length;
+        if(result.deferred?.length){catchUpState.deferred+=result.deferred.length;note('部分待回复会话尚待核验，将重试：'+result.deferred[0].reason);}
         for (const message of result.messages) {
           if (message.shopId !== connectedShopId) throw Error('待回复会话店铺不一致');
           const previous = latest.get(message.buyerId);
@@ -740,8 +742,9 @@ async function scanUnreplied(nonce = runNonce) {
       const result = readOnlyDiagnostic ? {status:'read_only'} : engine.recoverUnrepliedMessage(message);
       if (result.status === 'created') catchUpState.created++; else catchUpState.skipped++;
     }
-    catchUpState.phase = 'complete';
+    catchUpState.phase = catchUpState.deferred ? 'retrying' : 'complete';
     note(`待回复检查完成：两个列表共读取 ${catchUpState.scanned} 条记录，近七天待回复会话 ${catchUpState.candidates} 个，已安排补答 ${catchUpState.created} 条，已有任务或无需补答 ${catchUpState.skipped} 条。`);
+    if(catchUpState.deferred){catchUpState.message='部分会话核验尚未完成，30 秒后重试';catchUpTimer=setTimeout(()=>{if(nonce===runNonce)void scanUnreplied(nonce);},30000);}
   } catch(error) {
     if (nonce !== runNonce || token !== catchUpToken) return;
     catchUpState.phase = 'retrying'; catchUpState.message = error.message;

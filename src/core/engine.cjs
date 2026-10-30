@@ -541,6 +541,7 @@ class Engine {
     let plan;
     if(contentChanged){
       if(job.strategy==='greeting')plan=config.greetingEnabled&&config.greeting?{content:config.greeting,matchName:'首次欢迎语',strategy:'greeting'}:null;
+      else if(job.officialPendingFallback)plan=config.fallback?{content:config.fallback,matchName:'默认回复',strategy:'fallback'}:null;
       else if(typeof job.sourceText==='string')plan=planReplies({...job,text:job.sourceText},{...config,greetingEnabled:false},{now:this._time(),previousAskAt:this._time(),random:()=>0})[0];
       else if(job.strategy==='fallback'&&previous&&JSON.stringify(previous.replyRules)===JSON.stringify(config.replyRules))plan=config.fallback?{content:config.fallback,matchName:'默认回复',strategy:'fallback'}:null;
       if(!plan){job.status='cancelled';job.reason='rules_changed';job.updatedAt=this._time();this._state.counts.cancelled++;return;}
@@ -867,19 +868,21 @@ class Engine {
       messageId: textField(input.messageId, '消息 ID', { max: 512, nonempty: true }),
       text: textField(input.text, '消息正文', { fallback: '', max: 100000 }), direction: 'incoming' };
     if (input.direction !== 'incoming' || input.pending !== true || !Number.isFinite(input.sentAt) || input.sentAt < this._time() - 7 * 86400000 || input.sentAt > this._time() + 60000) throw new Error('补答需要近七天官方待回复的买家消息');
+    const fallbackEvidence = input.officialPendingFallback;
+    if (fallbackEvidence !== undefined && (!plain(fallbackEvidence) || fallbackEvidence.historyVerified !== true || typeof fallbackEvidence.markerMessageId !== 'string' || !fallbackEvidence.markerMessageId || fallbackEvidence.markerMessageId.length > 200 || !Number.isFinite(fallbackEvidence.pendingSince) || fallbackEvidence.pendingSince <= 0 || fallbackEvidence.pendingSince > event.sentAt || event.messageId !== 'official-pending:'+JSON.stringify([fallbackEvidence.markerMessageId,fallbackEvidence.pendingSince]) || event.text !== '')) throw Error('官方待回复默认补答证据无效');
     const automaticEvidence = input.officialAutoReplyPending;
     if (automaticEvidence !== undefined && (!plain(automaticEvidence) || automaticEvidence.historyVerified !== true || automaticEvidence.sourceMessageId !== event.messageId || typeof automaticEvidence.automaticMessageId !== 'string' || !automaticEvidence.automaticMessageId || automaticEvidence.automaticMessageId.length > 512 || automaticEvidence.automaticMessageId === event.messageId || !Number.isFinite(automaticEvidence.pendingSince) || automaticEvidence.pendingSince <= 0 || automaticEvidence.pendingSince > event.sentAt)) throw Error('官方自动回复后的待回复证据无效');
     const hintEvidence = input.platformHintPending;
     if (hintEvidence !== undefined && (!plain(hintEvidence) || hintEvidence.historyVerified !== true || hintEvidence.sourceMessageId !== event.messageId || typeof hintEvidence.hintMessageId !== 'string' || !hintEvidence.hintMessageId || hintEvidence.hintMessageId.length > 512 || hintEvidence.hintMessageId === event.messageId || !Number.isFinite(hintEvidence.pendingSince) || hintEvidence.pendingSince <= 0 || hintEvidence.pendingSince > event.sentAt)) throw Error('官方系统提示后的待回复证据无效');
-    if (automaticEvidence && hintEvidence) throw Error('待回复来源证据不能混用');
-    const pendingEvidence = automaticEvidence || hintEvidence;
-    const markerMessageId = automaticEvidence?.automaticMessageId || hintEvidence?.hintMessageId;
+    if ([automaticEvidence,hintEvidence,fallbackEvidence].filter(Boolean).length > 1) throw Error('待回复来源证据不能混用');
+    const pendingEvidence = automaticEvidence || hintEvidence || fallbackEvidence;
+    const markerMessageId = automaticEvidence?.automaticMessageId || hintEvidence?.hintMessageId || fallbackEvidence?.markerMessageId;
     const config = this._state.config;
     if (!config.running || !config.autoReplyEnabled || !config.catchUpUnrepliedEnabled) return { status: 'disabled' };
     const key = JSON.stringify([event.shopId, event.messageId]);
     const buyerKey = JSON.stringify([event.shopId, event.buyerId]);
     // Catch-up chooses the primary rule/fallback once, without another welcome.
-    const plans = planReplies(event, { ...config, greetingEnabled: false }, { now: this._time(), previousAskAt: this._time(), random: () => 0 });
+    const plans = planReplies(event, { ...config, greetingEnabled: false, ...(fallbackEvidence?{replyRules:[]}: {}) }, { now: this._time(), previousAskAt: this._time(), random: () => 0 });
     if (!plans.length) return { status: 'no_content' };
     const plan = plans[0];
     const identity=[plan.content, plan.replyRuleId || '', config.replySuffixEnabled, config.replySuffixMode];
@@ -907,7 +910,7 @@ class Engine {
     const claimParts = [event.shopId, event.buyerId, event.messageId, fingerprint];
     if (reviewedCancellationJobId !== undefined) claimParts.push('reviewed_cancellation', reviewedCancellationJobId);
     if (retryRejectedJobId !== undefined) claimParts.push('retry_rejected', retryRejectedJobId);
-    if (pendingCancelled) claimParts.push(hintEvidence ? 'platform_hint' : 'official_automatic_reply', pendingCancelled.id);
+    if (pendingCancelled) claimParts.push(fallbackEvidence?'official_pending_fallback':hintEvidence ? 'platform_hint' : 'official_automatic_reply', pendingCancelled.id);
     const claimKey = JSON.stringify(claimParts);
     if (this._state.ledger.replyRecovery[claimKey]) return { status: 'already_attempted' };
     const reviewed = reviewedCancellationJobId === undefined ? null : previous.find(job => job.id === reviewedCancellationJobId);
@@ -927,9 +930,11 @@ class Engine {
       job = this._job('reply', event, { ...plan, simulation: false });
       Object.assign(job, { strategy: plan.strategy, catchUp: true, needsReplyVerification: true, sourceSentAt: input.sentAt,
         notBefore: Math.max(this._time() + plan.delaySeconds * 1000, cooldownUntil) });
+      if(fallbackEvidence)job.officialPendingFallback=clone(fallbackEvidence);
       if (pendingCancelled) {
         pendingCancelled.reviewedAt=this._time();pendingCancelled.recoveryJobId=job.id;
-        if (hintEvidence) job.platformHintRecoveryJobId=pendingCancelled.id;
+        if (fallbackEvidence) job.officialPendingFallbackRecoveryJobId=pendingCancelled.id;
+        else if (hintEvidence) job.platformHintRecoveryJobId=pendingCancelled.id;
         else job.officialAutoReplyRecoveryJobId=pendingCancelled.id;
         this._log('info','官方仍标记待回复，已核验提示后的原始咨询并恢复未发送任务',{code:hintEvidence?'platform_hint_reply_recovered':'official_auto_reply_recovered',jobId:job.id,previousJobId:pendingCancelled.id,markerMessageId});
       }
@@ -956,6 +961,7 @@ class Engine {
       this._state.ledger.lastAsk[buyerKey] = this._time();
       this._state.ledger.replyHistory[buyerKey] = [...history, { at: this._time(), content: plan.content, replyRuleId: plan.replyRuleId || '' }].slice(-100);
       if (hintEvidence) this._log('info','已从平台系统提示前找回待回复咨询，按当前规则安排补答',{code:'platform_hint_pending_queued',jobId:job.id,hintMessageId:hintEvidence.hintMessageId,sourceMessageId:event.messageId,pendingSince:hintEvidence.pendingSince});
+      if (fallbackEvidence) this._log('info','官方仍标记待回复，原文不可用于匹配，已按当前默认答复安排补答',{code:'official_pending_fallback_queued',jobId:job.id,markerMessageId:fallbackEvidence.markerMessageId,pendingSince:fallbackEvidence.pendingSince});
       this._log('info', '官方确认会话仍待回复，已按当前规则安排补答', { code: 'catch_up_queued', jobId: job.id });
     });
     return { status: 'created', job: clone(job) };

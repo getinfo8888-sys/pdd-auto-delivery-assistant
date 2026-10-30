@@ -96,6 +96,7 @@ async function bridgeRuntime(action, payload) {
   const marked = value => value === true || value === 1 || value === '1';
   const officialAutomatic = row => row?.from?.role === 'mall_cs' && (marked(row.show_auto) || row.from.csid === '自动回复');
   async function pendingConversation(row, requirePendingTime = true) {
+    if (!row || row.from?.role === 'user' && Number(row.from.user_type) === 6 || row.chat_type === 'conciliation' || Number(row.chat_type_id) === 9) return null;
     const incoming = pendingMessage(row, requirePendingTime);
     if (incoming) return incoming;
     // A robot bubble or platform notice can hide the unanswered inquiry in
@@ -104,9 +105,14 @@ async function bridgeRuntime(action, payload) {
     // Resolve its source through read-only history without clearing that time.
     const pendingSince = Number(row.last_unreply_time) * 1000;
     const notice = [31,41,51,56].includes(numeric(row.type));
-    if ((!notice && (!officialAutomatic(row) || !marked(row.need_reply))) || !(pendingSince > 0)) return null;
+    // A withdrawn message, image, goods card or a new official message type
+    // must not disappear merely because it is not ordinary buyer text.
+    const pendingBuyer = row.from?.role === 'user' && row.to?.role === 'mall_cs';
+    const fallbackMarker = pendingBuyer && !notice;
+    if ((!notice && !fallbackMarker && (!officialAutomatic(row) || !marked(row.need_reply))) || !(pendingSince > 0)) return null;
+    if (pendingSince < Date.now()-7*86400000 || pendingSince > Date.now()+60000) return null;
     const merchantUid = id(store?.state?.userInfo?.uid), api = chatApi();
-    const incomingNotice = notice && row.from?.role === 'user' && row.to?.role === 'mall_cs' && id(row.to.uid) === merchantUid;
+    const incomingNotice = (notice || fallbackMarker) && pendingBuyer && id(row.to.uid) === merchantUid;
     const outgoingMarker = row.from?.role === 'mall_cs' && id(row.from.uid) === merchantUid && row.to?.role === 'user';
     const buyerId = incomingNotice ? id(row.from.uid) : outgoingMarker ? id(row.to.uid) : '';
     const markerMessageId = id(row.msg_id);
@@ -145,6 +151,10 @@ async function bridgeRuntime(action, payload) {
       ids.add(messageId);
       const incoming = message.from?.role === 'user' && id(message.from.uid) === buyerId && message.to?.role === 'mall_cs' && id(message.to.uid) === merchantUid;
       const outgoing = message.from?.role === 'mall_cs' && id(message.from.uid) === merchantUid && message.to?.role === 'user' && id(message.to.uid) === buyerId;
+      if (messageId === markerMessageId && fallbackMarker) {
+        if (!incoming || numeric(message.type) !== numeric(row.type) || Number(message.ts) !== Number(row.ts)) throw Error('官方待回复标记与历史消息不一致');
+        foundMarker = true;
+      }
       if (hint(message.no_unreply_hint) || hint(message.is_system_hint_mall) || [31,41,51,56].includes(numeric(message.type)) || message.from?.role === 'user' && Number(message.from.user_type) === 6) {
         if (notice && messageId === markerMessageId) {
           if (!incoming && !outgoing) throw Error('官方提示历史的会话身份不一致');
@@ -159,15 +169,34 @@ async function bridgeRuntime(action, payload) {
       }
       effective.push({message,incoming});
     }
-    if (!foundMarker || !effective.length) throw Error('尚未取得完整的官方提示及买家咨询，稍后重新核验');
-    if (!effective[0].incoming) return null; // A subsequent real merchant reply wins.
+    if (!foundMarker) throw Error('尚未取得完整的官方待回复标记，稍后重新核验');
+    // Use descending platform timestamps, retaining the official order on ties.
+    effective.sort((a,b)=>Number(b.message.ts)-Number(a.message.ts));
+    if (effective[0] && !effective[0].incoming && Number(effective[0].message.ts)*1000 >= pendingSince) return null;
+    const fallback = () => {
+      const sentAt = Math.max(Number(row.ts)*1000,pendingSince);
+      if (!Number.isFinite(sentAt) || sentAt < Date.now()-7*86400000 || sentAt > Date.now()+60000) throw Error('官方待回复标记时间无效');
+      // This is a local recovery key, not a fabricated platform message ID.
+      // A new pending cycle of the same withdrawn message gets its own key.
+      return {shopId,buyerId,messageId:'official-pending:'+JSON.stringify([markerMessageId,pendingSince]),text:'',sentAt,direction:'incoming',pending:true,type:'0',subType:'0',
+        officialPendingFallback:{markerMessageId,pendingSince,historyVerified:true}};
+    };
+    if (fallbackMarker || !effective.length || !effective[0].incoming) return fallback();
     const source = effective[0].message;
-    if (Number(source.ts) * 1000 < pendingSince) throw Error('官方待回复时间与买家咨询尚未同步');
+    if (Number(source.ts) * 1000 < pendingSince) return fallback();
     const message = pendingMessage({...source,last_unreply_time:pendingSince/1000});
-    if (!message) return null;
+    if (!message) return fallback();
     if (notice) message.platformHintPending = {hintMessageId:markerMessageId,sourceMessageId:message.messageId,pendingSince,historyVerified:true};
     else message.officialAutoReplyPending = {automaticMessageId:markerMessageId,sourceMessageId:message.messageId,pendingSince,historyVerified:true};
     return message;
+  }
+  async function pendingPage(rows) {
+    const messages=[],deferred=[];
+    for (const row of rows) {
+      try {const message=await pendingConversation(row);if(message)messages.push(message);}
+      catch(error){deferred.push({buyerId:id(row?.from?.role==='user'?row.from.uid:row?.to?.uid),reason:clean(error.message,500)});}
+    }
+    return {messages,deferred};
   }
   const orderProjection = row => {
     const orderId=id(row?.order_sn);
@@ -240,8 +269,7 @@ async function bridgeRuntime(action, payload) {
       const page = Number.isInteger(payload.page) && payload.page > 0 ? payload.page : 1;
       const data = await axios.post('/plateau/chat/unreply_conversations', { page, size: 100 });
       if (!Array.isArray(data?.conversations) || ![true,false,0,1].includes(data.has_more)) throw Error('官方待回复列表结构已变化');
-      const messages=[];for (const row of data.conversations) { const message=await pendingConversation(row);if(message)messages.push(message); }
-      return { ready: true, page, messages, hasMore: !!data.has_more, scanned: data.conversations.length };
+      return { ready: true, page, ...await pendingPage(data.conversations), hasMore: !!data.has_more, scanned: data.conversations.length };
     }
     if (action === 'reply-check') {
       assertShop();
@@ -253,6 +281,21 @@ async function bridgeRuntime(action, payload) {
         catch (error) { clearTimeout(timer); reject(error); }
       });
       if (data?.result !== 'ok' || id(data.uid) !== buyerId || !Object.hasOwn(data, 'conversation')) throw Error('官方会话核验结果不完整');
+      // Some latest-message variants omit the wait timestamp for nontext
+      // events. Do not interpret that missing field as "already answered".
+      // Re-read the official pending list, with bounded paging, instead.
+      if (data.conversation && !Object.hasOwn(data.conversation,'last_unreply_time') && !pendingMessage(data.conversation,false)) {
+        if(!axios)throw Error('官方待回复状态尚未就绪');
+        for(let page=1;page<=10;page++){
+          const pending=await axios.post('/plateau/chat/unreply_conversations',{page,size:100});
+          if(!Array.isArray(pending?.conversations)||![true,false,0,1].includes(pending.has_more))throw Error('官方待回复核验列表结构已变化');
+          const matches=pending.conversations.filter(row=>row?.from?.role==='user'&&id(row.from.uid)===buyerId||row?.to?.role==='user'&&id(row.to.uid)===buyerId);
+          if(matches.length>1)throw Error('官方待回复核验出现重复会话');
+          if(matches.length){const message=await pendingConversation(matches[0]);return {ready:true,pending:!!message,message};}
+          if(!pending.has_more)return {ready:true,pending:false,message:null};
+        }
+        throw Error('待回复核验尚未遍历完成，稍后继续');
+      }
       const message = data.conversation === null ? null : await pendingConversation(data.conversation, false);
       if (message && message.buyerId !== buyerId) throw Error('官方会话买家编号不一致');
       return { ready: true, pending: !!message, message };
@@ -407,8 +450,7 @@ async function bridgeRuntime(action, payload) {
         catch(error) {clearTimeout(timer);reject(error);}
       });
       if (data?.result !== 'ok' || !Array.isArray(data.conversations) || ![true,false,0,1].includes(data.has_more)) throw Error('官方近七天会话列表结构已变化');
-      const messages=[];for(const row of data.conversations){const message=await pendingConversation(row);if(message)messages.push(message);}
-      return { ready:true, page, messages, hasMore:!!data.has_more, scanned:data.conversations.length };
+      return { ready:true, page, ...await pendingPage(data.conversations), hasMore:!!data.has_more, scanned:data.conversations.length };
     }
     if (action==='waiting') {
       const {orders}=ordersApi(); const page=Number.isInteger(payload.page) && payload.page>0 ? payload.page : 1;
