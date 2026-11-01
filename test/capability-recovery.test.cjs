@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const {CapabilityRecovery,pageRefreshDecision}=require('../src/core/capability-recovery.cjs');
+const {CapabilityRecovery,pageRefreshDecision,orderPageRecoveryNeeded,orderPageRecoveryDecision}=require('../src/core/capability-recovery.cjs');
 test('order verification isolates delivery and retains chat/refund availability with bounded retries',()=>{
   let now=1000;const c=new CapabilityRecovery({now:()=>now});
   c.success('refunds');const failed=c.failure('orders',Error('请完成滑块安全验证'));
@@ -32,4 +32,26 @@ test('verification, login and unsent drafts survive every automatic network refr
       assert.equal(pageRefreshDecision({kind,visibleKind:kind,healthy:false,recoveryRequested:true,status}),expected);
     }
   }
+});
+
+test('order context failures schedule real page recovery while business errors do not cause reload storms',()=>{
+  for(const message of ['请打开官方客服或订单页面并登录','官方页面尚未加载，请先登录','官方订单请求组件尚未加载','官方订单读取超时，请检查官方页面后重试','net::ERR_INTERNET_DISCONNECTED','Network Error'])assert.equal(orderPageRecoveryNeeded(Error(message)),true,message);
+  assert.equal(orderPageRecoveryNeeded({code:'read_timeout',message:'请求超时'}),true);
+  for(const message of ['官方订单列表结构已变化','订单暂时缺少可核验的买家编号','拼多多未接受发货操作','当前店铺与任务店铺不一致','官方订单页需要完成滑块验证'])assert.equal(orderPageRecoveryNeeded(Error(message)),false,message);
+});
+
+test('refreshing a merchant editor is not order recovery; a failed order context must return to its entry',()=>{
+  for(const url of ['https://mms.pinduoduo.com/home','https://mms.pinduoduo.com/goods/goods_edit?id=fixture','about:blank','chrome-error://chromewebdata/'])assert.equal(orderPageRecoveryDecision({url,status:{loaded:true},reason:'请打开官方客服或订单页面并登录'}),'restore_entry');
+  const url='https://mms.pinduoduo.com/orders/list';
+  assert.equal(orderPageRecoveryDecision({url,reason:'官方订单请求组件尚未加载'}),'refresh');
+  assert.equal(orderPageRecoveryDecision({url,status:{loaded:true,crashed:true},reason:'商家页面进程退出，正在自动恢复'}),'refresh');
+  assert.equal(orderPageRecoveryDecision({url,reason:'官方订单页需要完成滑块验证'}),'read_again');
+  assert.equal(orderPageRecoveryDecision({url,reason:'官方订单列表结构已变化'}),'read_again');
+});
+
+test('order recovery preserves actual login, CAPTCHA, drafts and unfinished loads before any navigation',()=>{
+  const url='https://mms.pinduoduo.com/goods/goods_edit';
+  for(const [status,outcome]of [[{login:true},'login_preserved'],[{verification:true},'verification_preserved'],[{hasDraft:true},'draft_preserved'],[{loaded:false},'loading']])assert.equal(orderPageRecoveryDecision({url,status}),outcome);
+  assert.equal(orderPageRecoveryDecision({url:'https://mms.pinduoduo.com/login/'}),'login_preserved');
+  assert.equal(orderPageRecoveryDecision({url,loading:true}),'loading');
 });

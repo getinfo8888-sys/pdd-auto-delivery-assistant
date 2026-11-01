@@ -8,7 +8,7 @@ const { validateImages } = require('./core/message-parts.cjs');
 const { exportSharedContent, SharedImportDraft } = require('./core/shared-content.cjs');
 const { StartupListener } = require('./core/startup-listener.cjs');
 const { NetworkRefresh } = require('./core/network-refresh.cjs');
-const { CapabilityRecovery, pageRefreshDecision } = require('./core/capability-recovery.cjs');
+const { CapabilityRecovery, pageRefreshDecision, orderPageRecoveryNeeded, orderPageRecoveryDecision } = require('./core/capability-recovery.cjs');
 const { AlertService } = require('./core/alert-service.cjs');
 const { connectionSample } = require('./core/alert-health.cjs');
 const { CloudWatchdog } = require('./core/cloud-watchdog.cjs');
@@ -20,6 +20,7 @@ const { makeBridgeScript } = require('./platform/pdd-bridge.cjs');
 const { attachPopupGuard } = require('./platform/pdd-popups.cjs');
 const { makePageStatusScript } = require('./platform/page-status.cjs');
 const capabilitySmoke = !app.isPackaged && process.argv.includes('--capability-smoke');
+const orderRecoveryPreview = !app.isPackaged && process.argv.includes('--order-recovery-preview');
 const startupSmoke = !app.isPackaged && process.argv.includes('--startup-smoke');
 const layoutSmoke = !app.isPackaged && process.argv.includes('--layout-smoke');
 const sharedRulesSmoke = !app.isPackaged && process.argv.includes('--shared-rules-smoke');
@@ -32,7 +33,7 @@ const networkReadOnly = !app.isPackaged && process.argv.includes('--network-read
 const imageUploadAudit = !app.isPackaged && process.argv.includes('--image-upload-audit');
 const popupCleanupAudit = !app.isPackaged && process.argv.includes('--popup-cleanup-audit');
 const receiptReadOnly = !app.isPackaged && process.argv.includes('--receipt-readonly');
-const smokeMode = !app.isPackaged && (process.argv.includes('--smoke-test') || startupSmoke || layoutSmoke || capabilitySmoke || sharedRulesSmoke || liveSettingsSmoke || cloudWatchdogSmoke);
+const smokeMode = !app.isPackaged && (process.argv.includes('--smoke-test') || startupSmoke || layoutSmoke || capabilitySmoke || orderRecoveryPreview || sharedRulesSmoke || liveSettingsSmoke || cloudWatchdogSmoke);
 const platformReadOnly = !app.isPackaged && process.argv.includes('--platform-readonly');
 const workflowReadOnly = !app.isPackaged && process.argv.includes('--workflow-readonly');
 const readOnlyDiagnostic = !app.isPackaged && (process.argv.includes('--read-only-diagnostic') || platformReadOnly || workflowReadOnly || catchUpReadOnly || networkReadOnly || popupCleanupAudit || receiptReadOnly);
@@ -66,6 +67,7 @@ let phoneAlerts,phoneAlertTimer,desktopAlert,cloudWatchdog;
 let lastPageStatusCheck = 0;
 const pageStates = {}, lastPageLoadedAt = new Map();
 const pagesToRecover = new Set(), lastPageRecovery = new Map();
+let lastOrderRecoveryOutcome='';
 let catchUpState = { phase: 'idle', scanned: 0, candidates: 0, created: 0, skipped: 0 };
 const diagnostics = { chat: { ready: false, message: '尚未打开官方客服页面' }, orders: { ready: false, message: '尚未打开官方订单页面' }, notes: [] };
 let officialInspection = { ready: false, readOnly: true, issue: '尚未检测官方客服数据' };
@@ -136,7 +138,8 @@ function applyLiveConfig(value,{startup}={}){
   const previous=engine.snapshot().config;
   const config=validateConfig({...value,running:previous.running});
   if(startup!==undefined&&typeof startup!=='boolean')throw Error('开机启动设置格式不正确');
-  if(typeof startup==='boolean'&&startup!==app.getLoginItemSettings().openAtLogin)app.setLoginItemSettings({openAtLogin:startup});
+  if(orderRecoveryPreview&&startup===true)throw Error('隔离测试版不能修改系统开机启动');
+  if(!orderRecoveryPreview&&typeof startup==='boolean'&&startup!==app.getLoginItemSettings().openAtLogin)app.setLoginItemSettings({openAtLogin:startup});
   if(JSON.stringify(previous)!==JSON.stringify(config)){
     engine.updateConfig(config);invalidatePendingWrites();
     const deliveryKeys=['products','suffix','deliveryFallback','deliveryFallbackEnabled','deliveryFallbackImages','separateLinksEnabled','autoDeliveryEnabled','autoConfirmShipmentEnabled'];
@@ -173,6 +176,7 @@ async function recoverPages(onlyKind='chat') {
   if (!online) throw new Error('电脑处于离线状态，网络恢复后将自动继续');
   for (const kind of [...pagesToRecover]) {
     if(kind!==onlyKind)continue;
+    if(kind==='orders'){await recoverOrderPage();continue;}
     if (Date.now() - (lastPageRecovery.get(kind) || 0) < 30000) continue;
     if (!listenIntent || closing) throw new Error('已手动停止自动连接');
     if (smokeMode) {
@@ -195,6 +199,48 @@ async function recoverPages(onlyKind='chat') {
     try { await readWithTimeout(wc.loadURL(entryUrls[kind]), kind); }
     catch(error) { lastPageRecovery.delete(kind);pagesToRecover.add(kind);throw error; }
   }
+}
+async function recoverOrderPage() {
+  // Never reload underneath a platform write or its read-only reconciliation.
+  if(dispatching || reconciling)return;
+  if(Date.now()-(lastPageRecovery.get('orders')||0)<(smokeMode?250:60000))return;
+  const nonce=runNonce;
+  const current=()=>listenIntent&&!closing&&!networkRefreshBusy&&engine.snapshot().config.running&&nonce===runNonce;
+  if(!current())return;
+  let status,url,loading=false,wc;
+  if(smokeMode){status=testPlatform.pageStatus?.orders||{};url=testPlatform.pageUrls?.orders||entryUrls.orders;}
+  else {
+    wc=ensureView('orders').webContents;url=wc.getURL();loading=wc.isLoading();
+    // An unreadable document is not proof that it is safe to discard an editor.
+    try{status=wc.isCrashed()?{loaded:true,crashed:true}:await readWithTimeout(wc.executeJavaScript(makePageStatusScript(),false),'orders');}
+    catch{return;}
+  }
+  if(!current()||!status||typeof status!=='object')return;
+  if(!smokeMode&&(wc.getURL()!==url||wc.isLoading()))return;
+  const outcome=orderPageRecoveryDecision({url,status,loading,reason:capabilityRecovery.state('orders').reason});
+  const record=()=>{
+    if(lastOrderRecoveryOutcome===outcome)return;
+    lastOrderRecoveryOutcome=outcome;
+    recordNetworkRecovery({event:'order_page_recovery',outcome});
+    if(outcome==='draft_preserved')note('订单连接等待恢复：已保留商家页面未保存的编辑，请保存后返回订单入口。客服继续运行。');
+    if(['restore_entry','refresh'].includes(outcome))note('正在自动恢复订单入口，完成后重新扫描待发货订单；客服继续运行。');
+  };
+  record();
+  if(['login_preserved','verification_preserved','draft_preserved','loading'].includes(outcome)){
+    pageStates.orders={phase:outcome==='draft_preserved'?'draft':outcome==='loading'?'loading':'needs_person',login:outcome==='login_preserved',verification:outcome==='verification_preserved',checkedAt:Date.now()};changed();return;
+  }
+  if(outcome==='read_again'){pagesToRecover.delete('orders');return;}
+  if(!current()||dispatching||reconciling)return;
+  // Failed navigations also consume the cooldown, avoiding a refresh storm.
+  lastPageRecovery.set('orders',Date.now());
+  pageStates.orders={phase:'refreshing',checkedAt:Date.now()};changed();
+  try {
+    if(smokeMode)await testPlatform.reload?.('orders',entryUrls.orders);
+    else {await readWithTimeout(wc.loadURL(entryUrls.orders),'orders');await updatePageState('orders',wc);}
+    if(!current())return;
+    pagesToRecover.delete('orders');orderPage=1;
+    recordNetworkRecovery({event:'order_page_recovery',outcome:'awaiting_probe'});
+  }catch(error){recordNetworkRecovery({event:'order_page_recovery',outcome:'load_failed'});throw error;}
 }
 function recordNetworkRecovery(event) {
   try {
@@ -266,7 +312,8 @@ async function refreshPagesAfterNetwork(context) {
             pageStates[kind] = { phase: 'needs_person', login: true, checkedAt: Date.now() };
             pages.push({ kind, outcome: 'login_preserved' }); continue;
           }
-          await readWithTimeout(wc.loadURL(allowedUrl(url) ? url : entryUrls[kind]), kind);
+          const target=kind==='orders'&&new URL(url||'about:blank').pathname!=='/orders/list'?entryUrls.orders:allowedUrl(url)?url:entryUrls[kind];
+          await readWithTimeout(wc.loadURL(target), kind);
           lastPageLoadedAt.set(kind, Date.now());
           await updatePageState(kind, wc);
         }
@@ -558,6 +605,7 @@ async function transport(job) {
 function recordCapabilityFailure(kind,error) {
   if(/店铺.*变化|店铺.*不一致/.test(error.message)) {pause('店铺变化，已暂停自动处理。');return;}
   const previous=capabilityRecovery.state(kind),state=capabilityRecovery.failure(kind,error);
+  if(kind==='orders'&&orderPageRecoveryNeeded(error))pagesToRecover.add('orders');
   bridgeDiagnostics[kind]={...state};
   // Bound disk writes during persistent failures; retain transitions and the
   // first error, then one diagnostic entry per five minutes.
@@ -607,6 +655,7 @@ async function pollCapability(kind) {
     if(!current())return;
     const previous=capabilityRecovery.state(kind);
     bridgeDiagnostics[kind]={...capabilityRecovery.success(kind,{hasMore:result.hasMore}),total:result.total};
+    if(kind==='orders'){pagesToRecover.delete('orders');lastOrderRecoveryOutcome='';}
     if(previous.failures) {note(`${kind==='orders'?'订单 / 发货':'售后 / 退款'}连接已恢复，继续处理保留的任务。`);recordNetworkRecovery({event:'capability_recovered',kind});}
     if(kind==='orders')orderPage=result.hasMore?orderPage+1:1;
     else refundPage=result.hasMore?refundPage+1:1;
@@ -946,19 +995,21 @@ function registerIpc() {
     });
     return { state: snapshot(), backupPath };
   });
-  handle('settings:startup', value => { app.setLoginItemSettings({ openAtLogin: value === true }); return snapshot(); });
+  handle('settings:startup', value => { if(orderRecoveryPreview)throw Error('隔离测试版不能修改系统开机启动');app.setLoginItemSettings({ openAtLogin: value === true }); return snapshot(); });
   handle('app:data-folder', () => shell.openPath(dataDir));
   handle('app:background', () => { window.hide(); return true; });
 }
 
-if (smokeMode) app.setPath('userData', path.resolve(__dirname,'..','work','smoke-instance'));
+if(orderRecoveryPreview){app.setName('pdd-order-recovery-preview');app.setAppUserModelId('local.linkfulfillment.workbench.order-recovery-preview');}
+if (smokeMode) app.setPath('userData', path.resolve(__dirname,'..','work',orderRecoveryPreview?'order-recovery-preview-instance':'smoke-instance'));
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', showWorkbench);
   app.whenReady().then(() => {
     const smoke = smokeMode;
-    dataDir = smoke ? path.resolve(__dirname, '..', 'work', 'smoke-data-' + Date.now()) : path.join(app.getPath('appData'), 'LinkDeliveryWorkbench'); fs.mkdirSync(dataDir, { recursive: true });
+    dataDir = smoke ? path.resolve(__dirname, '..', 'work', (orderRecoveryPreview?'order-recovery-preview-':'smoke-data-') + Date.now()) : path.join(app.getPath('appData'), 'LinkDeliveryWorkbench'); fs.mkdirSync(dataDir, { recursive: true });
     app.setPath('userData', path.join(dataDir, 'browser-data'));
+    if(orderRecoveryPreview)require('electron').session.defaultSession.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*','ws://*/*','wss://*/*']},(_details,done)=>done({cancel:true}));
     profile = validateProfile(readJson(path.join(dataDir, 'page-profile.json'), defaultProfile()));
     let stateFile=path.join(dataDir,'state.json');
     if (readOnlyDiagnostic || imageUploadAudit) {
@@ -990,12 +1041,12 @@ else {
         }
       }, 1000);
     }
-    window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1120, minHeight: 740, show: !smoke && !platformReadOnly && !imageUploadAudit && !popupCleanupAudit && !receiptReadOnly, title: '拼多多自动发货助手', icon: path.join(__dirname, 'renderer', 'icon.ico'), backgroundColor: '#f6f8fa', autoHideMenuBar: true, webPreferences: { offscreen: smoke&&!layoutSmoke, backgroundThrottling: false, preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
+    window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1120, minHeight: 740, show: (!smoke||orderRecoveryPreview) && !platformReadOnly && !imageUploadAudit && !popupCleanupAudit && !receiptReadOnly, title: '拼多多自动发货助手', icon: path.join(__dirname, 'renderer', 'icon.ico'), backgroundColor: '#f6f8fa', autoHideMenuBar:true, webPreferences: { offscreen: smoke&&!layoutSmoke&&!orderRecoveryPreview, backgroundThrottling: false, preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
     window.on('resize',()=>{for(const view of views.values())view.setVisible(false);});
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(uiUrl)) event.preventDefault(); });
     registerIpc(); window.loadURL(uiUrl);
-    if (smoke) window.webContents.once('did-finish-load', () => require(cloudWatchdogSmoke?'../scripts/cloud-watchdog-smoke.cjs':liveSettingsSmoke?'../scripts/live-settings-smoke.cjs':sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, phoneAlerts, desktopAlert, cloudWatchdog, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
+    if (smoke) window.webContents.once('did-finish-load', () => require(orderRecoveryPreview?'../scripts/order-recovery-preview.cjs':cloudWatchdogSmoke?'../scripts/cloud-watchdog-smoke.cjs':liveSettingsSmoke?'../scripts/live-settings-smoke.cjs':sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, phoneAlerts, desktopAlert, cloudWatchdog, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
     if (!smoke && !readOnlyDiagnostic && !liveWireAudit && !pendingReplyAudit && !imageUploadAudit && !process.argv.includes('--start-paused')) window.webContents.once('did-finish-load', () => startupListener.arm(engine.snapshot().config));
     if (imageUploadAudit) window.webContents.once('did-finish-load',()=>require('../scripts/image-upload-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('图片检查失败：'+error.message);app.exit(1);}));
     if (popupCleanupAudit) window.webContents.once('did-finish-load',()=>require('../scripts/popup-cleanup-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('弹窗检查失败：'+error.message);app.exit(1);}));

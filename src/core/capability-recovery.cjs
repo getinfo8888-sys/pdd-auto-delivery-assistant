@@ -31,4 +31,18 @@ function pageRefreshDecision({kind,visibleKind,healthy,status={},recoveryRequest
   if(kind==='chat'&&(!healthy||recoveryRequested))return 'refresh';
   return 'background_preserved';
 }
-module.exports={CapabilityRecovery,pageRefreshDecision};
+function orderPageRecoveryNeeded(error) {
+  const reason=String(error?.message || error || '');
+  return error?.code==='read_timeout' || /请打开官方客服或订单页面|官方页面尚未加载|官方页面尚未就绪|官方订单请求组件尚未加载|官方页面模块尚未加载|官方订单读取超时|ERR_(?:NETWORK|CONNECTION|INTERNET|NAME_NOT_RESOLVED)|Failed to fetch|Network Error|网络请求失败/i.test(reason);
+}
+function orderPageRecoveryDecision({url,status={},loading=false,reason=''}) {
+  let parsed;try{parsed=new URL(url);}catch{}
+  if(status.login || parsed && /\/(?:login|auth)(?:\/|$)/.test(parsed.pathname))return 'login_preserved';
+  if(status.verification)return 'verification_preserved';
+  if(status.hasDraft)return 'draft_preserved';
+  if(loading || status.loaded===false)return 'loading';
+  if(parsed?.origin!=='https://mms.pinduoduo.com' || parsed.pathname!=='/orders/list')return 'restore_entry';
+  if(status.crashed)return 'refresh';
+  return orderPageRecoveryNeeded(reason)?'refresh':'read_again';
+}
+module.exports={CapabilityRecovery,pageRefreshDecision,orderPageRecoveryNeeded,orderPageRecoveryDecision};
