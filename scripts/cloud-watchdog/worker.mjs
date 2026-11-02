@@ -2,7 +2,7 @@
 export const GAP = 60_000;
 const STABLE = 60_000;
 const reasons = new Set(['offline','login','verification','connection','orders','refunds','stalled']);
-const descriptions = {offline:'电脑断网、休眠或程序停止报平安',login:'商家登录失效',verification:'平台要求安全验证',connection:'客服连接持续异常',orders:'订单连接持续异常',refunds:'售后连接持续异常',stalled:'监听检测未能持续更新'};
+const descriptions = {offline:'助手检测到电脑网络不可用',login:'商家登录失效',verification:'平台要求安全验证',connection:'客服连接持续异常',orders:'订单连接持续异常',refunds:'售后连接持续异常',stalled:'监听检测未能持续更新'};
 const empty = () => ({version:1,armed:false,lastSeen:0,lastSentAt:0,runId:null,seq:-1,mode:'paused',healthySince:null,incident:null,lastNotification:null,daily:{day:'',attempts:0}});
 const reply = (data,status=200) => Response.json(data,{status,headers:{'cache-control':'no-store','x-content-type-options':'nosniff'}});
 export function validateBeat(value,now) {
@@ -21,9 +21,15 @@ export function acceptBeat(previous,beat,now) {
     if(s.healthySince===null)s.healthySince=now;
     if(s.incident&&now-s.healthySince>=STABLE)s.incident=null;
   }else{
+    const recovered=s.healthySince!==null;
     s.healthySince=null;
-    if(!s.incident)s.incident={id:crypto.randomUUID(),startedAt:now,reason:beat.reason,status:'pending',attempts:0,nextAt:now+GAP};
-    else s.incident.reason=beat.reason;
+    if(!s.incident)s.incident={id:crypto.randomUUID(),startedAt:now,reason:beat.reason,source:'reported_failure',status:'pending',attempts:0,nextAt:now+GAP};
+    else {
+      s.incident.reason=beat.reason;s.incident.source='reported_failure';
+      // Retain the deduplication ID, but do not count a healthy interval as
+      // continuous failure toward the one-minute notification threshold.
+      if(recovered&&['pending','retrying'].includes(s.incident.status))s.incident.nextAt=Math.max(s.incident.nextAt,now+GAP);
+    }
   }
   return s;
 }
@@ -33,7 +39,9 @@ export function inspectDue(previous,now) {
   if(now-s.lastSeen>=GAP){
     s.healthySince=null;
     if(!s.incident)s.incident={id:crypto.randomUUID(),startedAt:s.lastSeen,reason:'offline',status:'pending',attempts:0,nextAt:s.lastSeen+GAP};
-    else s.incident.reason='offline';
+    if(['pending','retrying'].includes(s.incident.status)){
+      s.incident.source='missing_heartbeat';s.incident.reason='offline';s.incident.lastReportedMode=s.mode;s.incident.lastSeen=s.lastSeen;
+    }
   }
   if(s.incident&&s.healthySince!==null&&now-s.healthySince>=STABLE)s.incident=null;
   return s;
@@ -57,9 +65,17 @@ export async function authorized(request,secret) {
 export async function notify(env,incident,fetchImpl=fetch) {
   const key=env.SERVERCHAN_SENDKEY;
   if(!/^SCT[A-Za-z0-9]{12,220}$/.test(key||''))return {status:'failed',error:'推送密钥未配置'};
-  const started=new Date(incident.startedAt).toISOString();
+  const date=at=>new Date(at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
+  // Missing heartbeats prove loss of contact with this monitor, not loss of the
+  // shop connection. In particular, a proxy/Worker route can fail independently.
+  const missing=incident.source==='missing_heartbeat'||!incident.source&&incident.reason==='offline';
+  const title=missing?'拼多多助手：云端监护失联':'拼多多助手：业务异常待处理';
+  const desp=missing
+    ?[`云端连续一分钟未收到助手心跳，当前无法确认助手状态。`,`最近心跳（北京时间）：${date(incident.lastSeen||incident.startedAt)}`,`失联前助手上报：${incident.lastReportedMode==='healthy'?'业务连接正常':incident.lastReportedMode==='unhealthy'?'业务连接异常':'未记录，无法确认'}`,'可能原因包括电脑断网、休眠、程序退出，或仅电脑到监护服务的网络链路异常。','此提醒不代表已确认店铺掉线；请检查助手当前状态。']
+    :[`助手持续上报业务异常，自动恢复尚未成功。`,`异常类型：${descriptions[incident.reason]}`,`异常开始（北京时间）：${date(incident.startedAt)}`,'请检查电脑上的助手、商家登录和安全验证。'];
+  desp.push(`事件编号：${incident.id}`);
   let response;
-  try{response=await fetchImpl(`https://sctapi.ftqq.com/${key}.send`,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(10000),headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({title:'拼多多助手：云端发现持续异常',desp:`异常类型：${descriptions[incident.reason]}\n异常开始（UTC）：${started}\n云端已超过一分钟未取得正常运行状态，请检查电脑网络、登录和助手。\n事件编号：${incident.id}`,noip:'1'})});}
+  try{response=await fetchImpl(`https://sctapi.ftqq.com/${key}.send`,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(10000),headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({title,desp:desp.join('\n'),noip:'1'})});}
   catch(error){return {status:'uncertain',stage:'request',errorType:['TypeError','TimeoutError','AbortError'].includes(error?.name)?error.name:'Error',error:'推送请求未取得回执，不能确认是否已受理；为避免重复不自动重发'};}
   if(response.status>=300&&response.status<400)return {status:'failed',httpStatus:response.status,error:'推送服务要求重定向，已停止，不会把密钥转发到其他地址'};
   let data;
@@ -116,7 +132,7 @@ export class Watchdog {
           }
         }
       }
-      if(incident&&['accepted','retrying','uncertain','failed'].includes(incident.status))s.lastNotification={...structuredClone(incident),at:Date.now()};
+      if(incident&&['accepted','retrying','uncertain','failed'].includes(incident.status)&&(s.lastNotification?.id!==incident.id||s.lastNotification.status!==incident.status||s.lastNotification.attempts!==incident.attempts))s.lastNotification={...structuredClone(incident),at:Date.now()};
       await this.save(s,Date.now());
     });
   }

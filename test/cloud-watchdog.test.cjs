@@ -46,6 +46,39 @@ test('healthy recovery before fault submission suppresses stale fault',async t=>
   const f=await fixture(t);await f.post('unhealthy','login');f.advance(55000);await f.post('healthy',null,2);f.advance(5000);await f.alarm();assert.equal(f.calls(),0);
   for(let i=3;i<=7;i++){f.advance(12000);await f.post('healthy',null,i);}await f.alarm();assert.equal(f.calls(),0);assert.equal(f.storage.state().incident,null);
 });
+
+test('missing cloud contact is distinct from an explicit offline report and shows last known business health',async t=>{
+  const f=await fixture(t);let message;
+  t.mock.method(globalThis,'fetch',async(_url,options)=>{message=options.body;return Response.json({code:0,data:{pushid:'fixture-receipt'}});});
+  await f.post();f.advance(60000);await f.alarm();
+  assert.equal(f.storage.state().incident.source,'missing_heartbeat');
+  assert.equal(message.get('title'),'拼多多助手：云端监护失联');
+  assert.match(message.get('desp'),/失联前助手上报：业务连接正常/);
+  assert.match(message.get('desp'),/不代表已确认店铺掉线/);
+  assert.match(message.get('desp'),/北京时间/);
+  assert.doesNotMatch(message.get('desp'),/自动恢复尚未成功/);
+});
+
+test('a client explicitly reporting offline is identified as a business fault while heartbeats continue',async t=>{
+  const f=await fixture(t);let message;
+  t.mock.method(globalThis,'fetch',async(_url,options)=>{message=options.body;return Response.json({code:0,data:{pushid:'fixture-receipt'}});});
+  await f.post('unhealthy','offline');for(let i=2;i<=5;i++){f.advance(15000);await f.post('unhealthy','offline',i);}await f.alarm();
+  assert.equal(message.get('title'),'拼多多助手：业务异常待处理');
+  assert.match(message.get('desp'),/助手持续上报业务异常/);
+});
+
+test('intermittent faults must last a fresh continuous minute before an unsubmitted notification',async t=>{
+  const f=await fixture(t);await f.post('unhealthy','connection');f.advance(40000);await f.post('healthy',null,2);
+  f.advance(10000);await f.post('unhealthy','connection',3);const id=f.storage.state().incident.id;
+  f.advance(10000);await f.alarm();assert.equal(f.calls(),0);
+  for(let i=4;i<=7;i++){f.advance(12500);await f.post('unhealthy','connection',i);}await f.alarm();
+  assert.equal(f.calls(),1);assert.equal(f.storage.state().incident.id,id);
+});
+
+test('receipt timestamp and submitted reason do not change on later alarms',async t=>{
+  const f=await fixture(t);await f.post('unhealthy','login');f.advance(60000);await f.alarm();const first=structuredClone(f.storage.state().lastNotification);
+  f.advance(180000);await f.alarm();assert.deepEqual(f.storage.state().lastNotification,first);assert.equal(f.calls(),1);
+});
 test('replayed heartbeat cannot extend the lease; client clock has bounded tolerance',async t=>{
   const f=await fixture(t);await f.post();const at=f.storage.state().lastSeen;f.advance(15000);assert.equal((await f.post('healthy',null,1)).status,409);assert.equal(f.storage.state().lastSeen,at);
   assert.equal((await f.post('healthy',null,2,f.now()-121000)).status,400);

@@ -1,5 +1,6 @@
 node_modules/
 .wrangler/
+.codex-attachments/
 .dev.vars*
 dist/
 work/
