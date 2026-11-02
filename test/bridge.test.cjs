@@ -445,6 +445,20 @@ test('orders retain SKU and explicit payment/shipping status; unknown aftersales
   const {run}=fixture({kind:'orders'});const value=await run('waiting');assert.equal(value.orders[0].sku,'网盘版');assert.equal(value.orders[0].eligible,true);assert.equal(value.orders[0].paidAt,null);
   assert.equal((await fixture({kind:'orders',order:{after_sales_status:undefined}}).run('waiting')).orders[0].eligible,false);
 });
+test('paid group-zero orders require the official ready-to-ship label and complete safe status evidence',async()=>{
+  const base={group_status:0,order_status_str:'待发货',after_sales_status:null,after_sales_id:null};
+  const f=fixture({kind:'orders',order:base});
+  const row=(await f.run('waiting')).orders[0];assert.equal(row.paid,true);assert.equal(row.eligible,true);
+  assert.equal((await f.run('order',{orderId:'order-1'})).order.eligible,true);
+  assert.equal((await f.run('ship',{job,allowWrite:true,runNonce:7})).status,'confirmed');
+  for(const patch of [{order_status_str:'待成团'},{order_status_str:undefined},{order_status_str:''},{group_status:undefined},{group_status:2},{group_status:99},{order_status:0},{order_status:2},{pay_status:0},{pay_status:3},{shipping_status:1},{after_sales_status:1,after_sales_id:'active'},{after_sales_status:null,after_sales_id:'active'}]){
+    const blocked=fixture({kind:'orders',order:{...base,...patch}});
+    assert.equal((await blocked.run('waiting')).orders[0].eligible,false,JSON.stringify(patch));
+    const checked=await blocked.run('ship',{job,allowWrite:true,runNonce:7});
+    if(patch.shipping_status!==1)assert.notEqual(checked.status,'confirmed',JSON.stringify(patch));
+    assert.equal(blocked.calls.some(call=>call.ship),false);
+  }
+});
 test('two explicit null aftersale fields mean no aftersale, while incomplete or active fields remain ineligible',async()=>{
   const live=await fixture({kind:'orders',order:{after_sales_status:null,after_sales_id:null}}).run('waiting');assert.equal(live.orders[0].eligible,true);assert.equal(live.orders[0].refunded,false);
   for(const order of [{after_sales_status:null},{after_sales_status:null,after_sales_id:'active'},{after_sales_status:1,after_sales_id:'active'},{after_sales_status:undefined,after_sales_id:null}])assert.equal((await fixture({kind:'orders',order}).run('waiting')).orders[0].eligible,false);

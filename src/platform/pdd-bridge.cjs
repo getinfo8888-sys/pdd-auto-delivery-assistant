@@ -206,10 +206,14 @@ async function bridgeRuntime(action, payload) {
     // Missing fields or a null status with an actual aftersale ID stay unknown.
     const noAfterSales=row.after_sales_status===null&&row.after_sales_id===null;
     const as=noAfterSales?0:numeric(row.after_sales_status);
-    const paid=os===1 && ps===2 && gs===1;
+    const paid=os===1 && ps===2;
+    // The official waiting list also returns group_status=0 for paid orders
+    // explicitly labelled ready to ship. Do not equate every zero/missing group
+    // marker with readiness: require this exact server label for that variant.
+    const groupReady=gs===1 || gs===0 && row.order_status_str==='待发货';
     const refunded=ps===3 || ps===4 || as!==null && as!==0;
     return { orderId, itemId:id(row.goods_id), title:clean(row.goods_name), sku:clean(row.spec), buyerId:id(row.uid),
-      paid, refunded, cancelled:os===2, shipped:ss===1 || ss===2, eligible:paid && ss===0 && as===0,
+      paid, refunded, cancelled:os===2, shipped:ss===1 || ss===2, eligible:paid && groupReady && ss===0 && as===0,
       status:paid && ss===0 ? '待发货' : paid && ss===1 ? '已发货' : '其他状态',
       paidAt:numeric(row.pay_time)>946684800 && numeric(row.pay_time)<4102444800 ? Number(row.pay_time)*1000 : null,
       itemCount:1 };
