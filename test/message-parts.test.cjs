@@ -36,6 +36,22 @@ test('delivery persists and sends text then raw URL then image before marking sh
  const shipment=f.engine.nextJob();assert.equal(shipment.type,'shipment');assert.deepEqual(shipment.dependencies,[parent.id,...children.map(j=>j.id)]);
  await f.engine.dispatch(shipment.id);assert.equal(f.engine.snapshot().stats.deliverySent,1);assert.equal(f.engine.snapshot().stats.shipmentSent,1);
 });
+
+test('a failed link or image retries its own part while another buyer is answered normally',async t=>{
+ const f=fixture(t,{autoConfirmShipmentEnabled:true,replyDelaySeconds:0,replyRules:[],fallback:'示例默认答复',products:[{id:'fixture',name:'示例内容',keywords:['示例商品'],content:'领取地址 https://example.test/resource',images:[image],enabled:true}]});
+ const parent=f.engine.ingestOrder({...f.event,title:'示例商品'});await f.engine.dispatch(parent.id);
+ const parts=f.engine.snapshot().jobs.filter(j=>j.parentJobId===parent.id);assert.deepEqual(parts.map(j=>j.partKind),['link','image']);
+ for(const [index,part] of parts.entries()){
+  f.respond({status:'rejected',reason:'平台暂时拒绝本条消息'});const failed=await f.engine.dispatch(part.id);
+  assert.equal(failed.status,'queued');assert.equal(failed.reason,'attachment_retry_wait');assert.ok(failed.nextAttemptAt>failed.updatedAt);assert.equal(f.engine.snapshot().config.running,true);
+  const reply=f.engine.ingestMessage({...f.incoming,buyerId:'another-buyer-'+index,messageId:'another-question-'+index,text:'咨询',sentAt:failed.updatedAt});
+  assert.equal(f.engine.nextJob().id,reply.id);f.respond({status:'confirmed',messageId:String(20000+index)});assert.equal((await f.engine.dispatch(reply.id)).status,'sent');
+  assert.equal(f.engine.snapshot().jobs.some(j=>j.type==='shipment'),false);f.advance(failed.nextAttemptAt);
+  assert.equal(f.engine.nextJob().id,part.id);f.respond({status:'confirmed',messageId:String(30000+index)});assert.equal((await f.engine.dispatch(part.id)).status,'sent');
+ }
+ assert.equal(f.calls.filter(j=>j.id===parent.id).length,1);assert.ok(parts.every(p=>f.calls.filter(j=>j.id===p.id).length===2));
+ const shipment=f.engine.nextJob();assert.equal(shipment.type,'shipment');assert.equal((await f.engine.dispatch(shipment.id)).status,'sent');assert.equal(f.engine.snapshot().config.running,true);
+});
 test('reply parts do not inherit invisible suffixes or recursively create more messages',async t=>{
  const f=fixture(t),parent=f.engine.ingestMessage(f.incoming);await f.engine.dispatch(parent.id);
  const children=f.engine.snapshot().jobs.filter(j=>j.parentJobId===parent.id);assert.equal(children.length,2);
