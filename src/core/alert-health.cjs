@@ -5,13 +5,14 @@ function classifyReason(text,kind='chat'){
   if(/离线|断网|网络未连接/.test(text))return 'offline';
   return kind==='chat'?'connection':kind;
 }
-function connectionSample({config,listenIntent=false,startup,bridgeAvailable,diagnostics,capabilities={},online=true,now=Date.now()}){
+function connectionSample({config,listenIntent=false,startup,bridgeAvailable,diagnostics,capabilities={},processingRecovery,online=true,now=Date.now()}){
   const wanted=!!(config.autoReplyEnabled||config.autoDeliveryEnabled||config.autoRefundEnabled)&&!!(config.running||listenIntent||startup?.active);
   const failures=[];
   if(startup?.active&&startup.attempt>0)failures.push({source:'reconnect',id:`${startup.generation}:${startup.attempt}`});
   if(diagnostics.chat?.ready===false&&diagnostics.chat.checkedAt)failures.push({source:'chat',id:String(diagnostics.chat.checkedAt)});
   const chatHealthy=config.running&&bridgeAvailable&&diagnostics.chat?.ready===true&&now-diagnostics.chat.checkedAt<45000;
   if(!online){failures.push({source:'network',id:String(Math.floor(now/15000))});return {wanted,online:false,healthy:false,scope:'chat',reason:'offline',failures};}
+  if(processingRecovery?.active){failures.push({source:'processing',id:String(processingRecovery.id)+':'+Math.floor(now/15000)});return {wanted,online:true,healthy:false,scope:'chat',reason:'stalled',failures};}
   if(config.running&&diagnostics.chat?.ready===true&&!chatHealthy)failures.push({source:'stalled',id:String(Math.floor(now/15000))});
   if(!chatHealthy){failures.push({source:'health:chat',id:String(Math.floor(now/15000))});const startupMessage=startup?.active&&['login','verification','offline','retrying'].includes(startup.state?.phase)?startup.state.message:'';return {wanted,online:true,healthy:false,scope:'chat',reason:classifyReason(startupMessage||diagnostics.chat?.message||''),failures};}
   let reason,scope;

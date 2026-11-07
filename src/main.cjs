@@ -12,6 +12,7 @@ const { CapabilityRecovery, pageRefreshDecision, orderPageRecoveryNeeded, orderP
 const { AlertService } = require('./core/alert-service.cjs');
 const { connectionSample } = require('./core/alert-health.cjs');
 const { CloudWatchdog } = require('./core/cloud-watchdog.cjs');
+const { DispatchRecovery } = require('./core/dispatch-recovery.cjs');
 const { DesktopAlert } = require('./desktop-alert.cjs');
 const { allowedUrl, defaultProfile, validateProfile, makeScript } = require('./platform/page-adapter.cjs');
 const { makeOfficialScript, summarizeOfficial } = require('./platform/pdd-official.cjs');
@@ -26,6 +27,7 @@ const layoutSmoke = !app.isPackaged && process.argv.includes('--layout-smoke');
 const sharedRulesSmoke = !app.isPackaged && process.argv.includes('--shared-rules-smoke');
 const liveSettingsSmoke = !app.isPackaged && process.argv.includes('--live-settings-smoke');
 const cloudWatchdogSmoke = !app.isPackaged && process.argv.includes('--cloud-watchdog-smoke');
+const dispatchRecoverySmoke = !app.isPackaged && process.argv.includes('--dispatch-recovery-smoke');
 const liveWireAudit = !app.isPackaged && process.argv.includes('--audit-live-wire');
 const pendingReplyAudit = !app.isPackaged && process.argv.includes('--audit-live-pending');
 const catchUpReadOnly = !app.isPackaged && process.argv.includes('--catchup-readonly');
@@ -33,7 +35,7 @@ const networkReadOnly = !app.isPackaged && process.argv.includes('--network-read
 const imageUploadAudit = !app.isPackaged && process.argv.includes('--image-upload-audit');
 const popupCleanupAudit = !app.isPackaged && process.argv.includes('--popup-cleanup-audit');
 const receiptReadOnly = !app.isPackaged && process.argv.includes('--receipt-readonly');
-const smokeMode = !app.isPackaged && (process.argv.includes('--smoke-test') || startupSmoke || layoutSmoke || capabilitySmoke || orderRecoveryPreview || sharedRulesSmoke || liveSettingsSmoke || cloudWatchdogSmoke);
+const smokeMode = !app.isPackaged && (process.argv.includes('--smoke-test') || startupSmoke || layoutSmoke || capabilitySmoke || orderRecoveryPreview || sharedRulesSmoke || liveSettingsSmoke || cloudWatchdogSmoke || dispatchRecoverySmoke);
 const platformReadOnly = !app.isPackaged && process.argv.includes('--platform-readonly');
 const workflowReadOnly = !app.isPackaged && process.argv.includes('--workflow-readonly');
 const readOnlyDiagnostic = !app.isPackaged && (process.argv.includes('--read-only-diagnostic') || platformReadOnly || workflowReadOnly || catchUpReadOnly || networkReadOnly || popupCleanupAudit || receiptReadOnly);
@@ -64,6 +66,11 @@ let startupListener, startPromise, catchUpTimer, catchUpToken = 0, catchUpCollec
 let listenIntent = false, recoveryShopId = '', connectFailures = 0;
 let networkRefresh, networkTimer, rendererOnline, networkRefreshBusy = false;
 let phoneAlerts,phoneAlertTimer,desktopAlert,cloudWatchdog;
+const dispatchRecovery=new DispatchRecovery({record:event=>{
+  const log=path.join(dataDir,'operation-recovery.jsonl');
+  if(fs.existsSync(log)&&fs.statSync(log).size>1024*1024){fs.copyFileSync(log,log+'.previous');fs.writeFileSync(log,'');}
+  fs.appendFileSync(log,JSON.stringify({at:new Date().toISOString(),...event})+'\n');
+}});
 let lastPageStatusCheck = 0;
 const pageStates = {}, lastPageLoadedAt = new Map();
 const pagesToRecover = new Set(), lastPageRecovery = new Map();
@@ -110,7 +117,7 @@ function recordPopupCleanup(value) {
   }
 }
 function snapshot() {
-  return { ...engine.snapshot(), revision:stateRevision, readOnly:readOnlyDiagnostic, cloudWatchdog:cloudWatchdog?.snapshot()||null, phoneAlerts:phoneAlerts?.snapshot()||null, autoStart: startupListener?.state || {phase:'idle',pending:false}, catchUp: catchUpState, connection: { profile, diagnostics, bridge: bridgeDiagnostics, network: networkRefresh?.state, pages: pageStates, shopId: connectedShopId, officialInspection, officialOrdersInspection, urls: Object.fromEntries([...views].map(([kind, view]) => [kind, view.webContents.getURL()])), coverage: '客服监听新消息，启动时分页核验近七天的待回复会话；订单与售后由官方接口分页扫描，执行结果以平台回执为准。' }, version: app.getVersion(), startup: app.getLoginItemSettings().openAtLogin, dataDir };
+  return { ...engine.snapshot(), revision:stateRevision, processingRecovery:dispatchRecovery.snapshot(), readOnly:readOnlyDiagnostic, cloudWatchdog:cloudWatchdog?.snapshot()||null, phoneAlerts:phoneAlerts?.snapshot()||null, autoStart: startupListener?.state || {phase:'idle',pending:false}, catchUp: catchUpState, connection: { profile, diagnostics, bridge: bridgeDiagnostics, network: networkRefresh?.state, pages: pageStates, shopId: connectedShopId, officialInspection, officialOrdersInspection, urls: Object.fromEntries([...views].map(([kind, view]) => [kind, view.webContents.getURL()])), coverage: '客服监听新消息，启动时分页核验近七天的待回复会话；订单与售后由官方接口分页扫描，执行结果以平台回执为准。' }, version: app.getVersion(), startup: app.getLoginItemSettings().openAtLogin, dataDir };
 }
 function changed() { stateRevision++; if (!closing && window && !window.isDestroyed() && engine) window.webContents.send('state:changed'); }
 function showWorkbench() {
@@ -164,6 +171,7 @@ function recoverConnection(kind = 'chat', message = '官方连接中断', { relo
   bridgeAvailable = false;
   bridgeDiagnostics[kind] = { ready: false, reason: message };
   diagnostics[kind] = { ready: false, message, checkedAt: Date.now() };
+  if(dispatchRecovery.snapshot().active){changed();return;}
   if (!startupListener?.active) {
     pause('连接中断，正在自动恢复页面与监听。', { keepAutoStart: true });
     startupListener?.recover(engine.snapshot().config);
@@ -735,6 +743,7 @@ async function poll(baseline=false) {
     bridgeAvailable=true;pollFailures=0;nextPollAt=0;
     changed();
   } catch(error) {
+    if(error.persistenceStage){dispatchRecovery.fail(error);note('本地结果保存异常，正在恢复，监听意图保持开启。');changed();if(baseline)throw error;return;}
     bridgeAvailable=false;pollFailures++;
     const delay=Math.min(30000,3000*2**Math.min(pollFailures-1,4));nextPollAt=Date.now()+delay;
     diagnostics.chat={ready:false,message:`官方连接暂不可用，${delay/1000} 秒后重试：${error.message}`,checkedAt:Date.now()};
@@ -748,12 +757,20 @@ async function poll(baseline=false) {
   finally {polling=false;}
 }
 async function pump() {
-  if (dispatching || readOnlyDiagnostic || !bridgeAvailable || networkRefreshBusy) return;
+  if (dispatching || closing || readOnlyDiagnostic || !listenIntent) return;
   dispatching=true;
   try {
+    if(dispatchRecovery.snapshot().active){
+      if(dispatchRecovery.recover(()=>engine.checkpoint())){note('本地结果保存已恢复，继续监听；结果不明的原操作先查询平台，不直接重发。');changed();}
+      return;
+    }
+    if(!bridgeAvailable || networkRefreshBusy)return;
     const job=engine.nextJob({excludeTypes:capabilityRecovery.excludedTypes({chatReady:bridgeAvailable,collectingReplies:catchUpCollecting})});
     if (job) { const result=await engine.dispatch(job.id);if(result.type==='delivery'&&result.status==='cancelled'&&result.reason==='rules_changed')seenOrders.delete(result.orderId);changed(); }
-  } catch(error) { if(smokeMode)console.error(error);pause('自动处理暂停：'+error.message); }
+  } catch(error) {
+    dispatchRecovery.fail(error);invalidatePendingWrites();
+    note('自动处理结果保存异常，正在恢复；原操作保留待核实状态：'+error.message);changed();
+  }
   finally {dispatching=false;}
 }
 
@@ -1023,7 +1040,7 @@ else {
         sendOverride:smokeMode?async(message,event)=>{if(typeof testPlatform?.sendPhoneAlert!=='function')throw Error('隔离样本未配置手机推送，不会请求外网');return testPlatform.sendPhoneAlert(message,event);}:undefined});
       cloudWatchdog=new CloudWatchdog({directory:dataDir,crypto:safeStorage,changed,fetchImpl:smokeMode?async(...args)=>{if(typeof testPlatform?.sendCloudHeartbeat!=='function')throw Error('隔离样本禁止外网心跳');return testPlatform.sendCloudHeartbeat(...args);}:(...args)=>net.fetch(...args)});
       phoneAlerts.setRemoteOwner(cloudWatchdog.snapshot().ownsMobile);
-      phoneAlertTimer=setInterval(()=>{if(closing)return;try{const sample=connectionSample({config:engine.snapshot().config,listenIntent,startup:startupListener,bridgeAvailable,diagnostics,capabilities:{orders:capabilityRecovery.state('orders'),refunds:capabilityRecovery.state('refunds')},online:smokeMode?testPlatform?.online!==false:net.isOnline()&&rendererOnline!==false});phoneAlerts.observe(sample);void cloudWatchdog.observe(sample).then(()=>{if(!closing)phoneAlerts.setRemoteOwner(cloudWatchdog.snapshot().ownsMobile);}).catch(()=>phoneAlerts.reportError());}catch{phoneAlerts.reportError();}},5000);
+      phoneAlertTimer=setInterval(()=>{if(closing)return;try{const sample=connectionSample({processingRecovery:dispatchRecovery.snapshot(),config:engine.snapshot().config,listenIntent,startup:startupListener,bridgeAvailable,diagnostics,capabilities:{orders:capabilityRecovery.state('orders'),refunds:capabilityRecovery.state('refunds')},online:smokeMode?testPlatform?.online!==false:net.isOnline()&&rendererOnline!==false});phoneAlerts.observe(sample);void cloudWatchdog.observe(sample).then(()=>{if(!closing)phoneAlerts.setRemoteOwner(cloudWatchdog.snapshot().ownsMobile);}).catch(()=>phoneAlerts.reportError());}catch{phoneAlerts.reportError();}},5000);
     }
     startupListener = new StartupListener({start:startListening,update:()=>changed()});
     networkRefresh = new NetworkRefresh({ refresh: refreshPagesAfterNetwork, settleMs: smokeMode ? 100 : 5000, update: value => {
@@ -1046,7 +1063,7 @@ else {
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(uiUrl)) event.preventDefault(); });
     registerIpc(); window.loadURL(uiUrl);
-    if (smoke) window.webContents.once('did-finish-load', () => require(orderRecoveryPreview?'../scripts/order-recovery-preview.cjs':cloudWatchdogSmoke?'../scripts/cloud-watchdog-smoke.cjs':liveSettingsSmoke?'../scripts/live-settings-smoke.cjs':sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, phoneAlerts, desktopAlert, cloudWatchdog, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
+    if (smoke) window.webContents.once('did-finish-load', () => require(dispatchRecoverySmoke?'../scripts/dispatch-recovery-smoke.cjs':orderRecoveryPreview?'../scripts/order-recovery-preview.cjs':cloudWatchdogSmoke?'../scripts/cloud-watchdog-smoke.cjs':liveSettingsSmoke?'../scripts/live-settings-smoke.cjs':sharedRulesSmoke?'../scripts/shared-rules-smoke.cjs':layoutSmoke?'../scripts/layout-smoke.cjs':capabilitySmoke?'../scripts/capability-smoke.cjs':startupSmoke?'../scripts/startup-smoke.cjs':'../scripts/smoke-driver.cjs').run({ app, window, tray, trayMenu, engine, dataDir, dispatchRecovery, startupListener, scanUnreplied, maintainPendingReplies, recoverConnection, poll, pollCapability, capabilityRecovery, bridgeDiagnostics, pause, networkRefresh, observeNetwork, views, phoneAlerts, desktopAlert, cloudWatchdog, configureTestPlatform:value=>{testPlatform=value;} }).catch(error => { console.error(error); app.exit(1); }));
     if (!smoke && !readOnlyDiagnostic && !liveWireAudit && !pendingReplyAudit && !imageUploadAudit && !process.argv.includes('--start-paused')) window.webContents.once('did-finish-load', () => startupListener.arm(engine.snapshot().config));
     if (imageUploadAudit) window.webContents.once('did-finish-load',()=>require('../scripts/image-upload-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('图片检查失败：'+error.message);app.exit(1);}));
     if (popupCleanupAudit) window.webContents.once('did-finish-load',()=>require('../scripts/popup-cleanup-audit.cjs').run({app,window,engine,ensureView,bridge,dataDir}).catch(error=>{console.error('弹窗检查失败：'+error.message);app.exit(1);}));

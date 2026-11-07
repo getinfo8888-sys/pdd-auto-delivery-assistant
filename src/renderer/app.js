@@ -108,7 +108,7 @@ function updateHeader() {
     if(state.config.autoDeliveryEnabled && state.connection.bridge?.orders.ready===false)partial.push('发货等待恢复');
     if(state.config.autoRefundEnabled && state.connection.bridge?.refunds.ready===false)partial.push('退款等待恢复');
     const partialLabel=partial.length?' · '+partial.join('，'):'';
-    const status = document.querySelector('#running-status'); status.className='status-label'+(running?' running':''); status.innerHTML=`<i></i>${esc(starting?'正在检测官方连接…':running?(state.readOnly?'只读联调已启动':!state.config.autoReplyEnabled&&!state.config.autoDeliveryEnabled&&!state.config.autoRefundEnabled?'仅监听 · 自动功能均已关闭':state.connection.diagnostics.chat.ready?'自动处理已启动':'等待官方连接')+partialLabel+catchUpLabel:autoPending?(autoLabels[state.autoStart.phase] || '正在自动连接…'):state.readOnly?'只读联调 · 已暂停':'监听已暂停')}`;
+    const status = document.querySelector('#running-status'); status.className='status-label'+(running?' running':''); status.innerHTML=`<i></i>${esc(starting?'正在检测官方连接…':running?(state.readOnly?'只读联调已启动':state.processingRecovery?.active?'等待处理恢复':!state.config.autoReplyEnabled&&!state.config.autoDeliveryEnabled&&!state.config.autoRefundEnabled?'仅监听 · 自动功能均已关闭':state.connection.diagnostics.chat.ready?'自动处理已启动':'等待官方连接')+partialLabel+catchUpLabel:autoPending?(autoLabels[state.autoStart.phase] || '正在自动连接…'):state.readOnly?'只读联调 · 已暂停':'监听已暂停')}`;
   document.querySelector('#running-button').innerHTML=icon(running||autoPending?'pause':'play')+(starting?'正在连接…':running?'暂停监听':autoPending?'取消自动连接':'开始监听');
   document.querySelector('#breadcrumb').textContent=navItems.find(row=>row[0]===page)[2];
 }

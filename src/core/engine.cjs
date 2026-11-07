@@ -365,13 +365,19 @@ function atomicSave(filePath, state) {
   fs.mkdirSync(directory, { recursive: true });
   const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   const backupTemporary = `${temporary}.bak`;
+  let stage='write-state-temp';
   try {
     writeSynced(temporary, `${JSON.stringify(state, null, 2)}\n`);
     if (fs.existsSync(filePath)) {
+      stage='write-backup-temp';
       writeSynced(backupTemporary, fs.readFileSync(filePath));
+      stage='replace-backup';
       fs.renameSync(backupTemporary, `${filePath}.bak`);
     }
+    stage='replace-state';
     fs.renameSync(temporary, filePath);
+  } catch(error) {
+    error.persistenceStage=stage;throw error;
   } finally {
     for (const leftover of [temporary, backupTemporary]) {
       try { fs.unlinkSync(leftover); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -448,6 +454,9 @@ class Engine {
     if (!Number.isFinite(time) || time < 0) throw new TypeError('时钟返回值无效');
     return Math.floor(time);
   }
+
+  // Persist conservative uncertain states before permitting another write.
+  checkpoint() { this._mutate(() => {}); }
 
   _replyCooldownUntil(event, content) {
     const body = normalized(content);
@@ -1170,7 +1179,7 @@ class Engine {
       job = this._state.jobs.find((candidate) => candidate.id === jobId);
       job.status = 'uncertain';
       job.reason = 'persistence_after_send';
-      throw new Error('发送之后未能保存结果，必须人工核实，禁止自动重试', { cause: error });
+      throw Object.assign(new Error('发送后本地结果处理失败，已保留待核实状态，禁止自动重试原操作', { cause: error }),{code:'RESULT_COMMIT_FAILED',jobId});
     }
     return clone(job);
   }
